@@ -24,6 +24,11 @@
 
 更细的功能拆分见 `docs/FEATURES.md`，完整设计说明见 `docs/PROJECT_DOCUMENTATION.md`，后续计划见 `TODO_ROADMAP.md`。
 
+另外，两个仿真总控 app 的行为说明见：
+
+- `docs/RUN_SIM_MARKET.md`
+- `docs/RUN_SIM_ORDER.md`
+
 ---
 
 ## 🛠 技术栈（很短版）

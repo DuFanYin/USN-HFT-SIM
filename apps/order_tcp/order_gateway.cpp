@@ -7,21 +7,29 @@
 
 #include "../common/messages.hpp"
 
+#include <usn/io/epoll_wrapper.hpp>
+#include <usn/protocol/tcp_protocol.hpp>
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <cstring>
 #include <iostream>
+#include <unordered_map>
 
 namespace {
 
 constexpr int kListenPort    = 9000;
-constexpr int kBacklog       = 128;
-constexpr int kMaxEvents     = 64;
+constexpr int kBacklog = 128;
+constexpr int kMaxEvents = 64;
+
+struct ConnectionContext {
+    usn::TcpConnection tcp{};
+};
 
 int create_listen_socket() {
     int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -64,27 +72,24 @@ int main() {
 
     std::cout << "[order_gateway] listening on TCP port " << kListenPort << " (single-thread loop)\n";
 
-    int epfd = ::epoll_create1(0);
-    if (epfd < 0) {
+    usn::EpollWrapper epoll(kMaxEvents);
+    if (epoll.fd() < 0) {
         std::perror("epoll_create1");
         ::close(listen_fd);
         return 1;
     }
 
-    epoll_event ev{};
-    ev.events  = EPOLLIN;
-    ev.data.fd = listen_fd;
-    if (::epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev) < 0) {
-        std::perror("epoll_ctl listen_fd");
+    if (!epoll.add(listen_fd, EPOLLIN)) {
+        std::perror("epoll add listen_fd");
         ::close(listen_fd);
-        ::close(epfd);
         return 1;
     }
 
-    epoll_event events[kMaxEvents];
+    std::unordered_map<int, ConnectionContext> conn_ctx;
+    std::vector<epoll_event> events;
 
     while (true) {
-        int n = ::epoll_wait(epfd, events, kMaxEvents, -1);
+        int n = epoll.wait(events, -1);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
@@ -93,8 +98,8 @@ int main() {
             break;
         }
 
-        for (int i = 0; i < n; ++i) {
-            int fd = events[i].data.fd;
+        for (const auto& ev : events) {
+            int fd = ev.data.fd;
 
             if (fd == listen_fd) {
                 // 接受新连接
@@ -107,14 +112,20 @@ int main() {
                     continue;
                 }
 
-                epoll_event conn_ev{};
-                conn_ev.events  = EPOLLIN;
-                conn_ev.data.fd = conn_fd;
-                if (::epoll_ctl(epfd, EPOLL_CTL_ADD, conn_fd, &conn_ev) < 0) {
-                    std::perror("epoll_ctl conn_fd");
+                if (!epoll.add(conn_fd, EPOLLIN)) {
+                    std::perror("epoll add conn_fd");
                     ::close(conn_fd);
                     continue;
                 }
+
+                ConnectionContext ctx{};
+                ctx.tcp.local_ip = htonl(INADDR_LOOPBACK);
+                ctx.tcp.remote_ip = htonl(INADDR_LOOPBACK);
+                ctx.tcp.local_port = static_cast<uint16_t>(kListenPort);
+                ctx.tcp.remote_port = ntohs(cli_addr.sin_port);
+                ctx.tcp.recv_seq = 1;
+                ctx.tcp.send_seq = 1;
+                conn_ctx.emplace(conn_fd, ctx);
 
                 char ip[64]{};
                 ::inet_ntop(AF_INET, &cli_addr.sin_addr, ip, sizeof(ip));
@@ -122,29 +133,63 @@ int main() {
                           << " (fd=" << conn_fd << ")\n";
 
             } else {
-                // 读取订单请求（简化：一条消息按固定大小读取）
-                usn::apps::OrderRequest req{};
-                ssize_t                 nread = ::read(fd, &req, sizeof(req));
+                std::array<uint8_t, 2048> buf{};
+                ssize_t nread = ::read(fd, buf.data(), buf.size());
                 if (nread <= 0) {
-                    if (nread < 0) {
+                    if (nread < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
                         std::perror("read");
                     }
-                    std::cout << "[order_gateway] connection closed, fd=" << fd << "\n";
-                    ::epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
-                    ::close(fd);
+                    if (nread == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+                        std::cout << "[order_gateway] connection closed, fd=" << fd << "\n";
+                        epoll.remove(fd);
+                        ::close(fd);
+                        conn_ctx.erase(fd);
+                    }
                     continue;
                 }
 
+                usn::Packet tcp_packet(buf.data(), static_cast<std::size_t>(nread));
+                usn::TcpHeader tcp_header{};
+                const uint8_t* payload = nullptr;
+                std::size_t payload_len = 0;
+                if (!usn::TcpProtocol::parse(tcp_packet, tcp_header, payload, payload_len)) {
+                    std::cerr << "[order_gateway] invalid tcp frame, fd=" << fd << "\n";
+                    continue;
+                }
+                if (payload_len < sizeof(usn::apps::OrderRequest)) {
+                    std::cerr << "[order_gateway] payload too small=" << payload_len << "\n";
+                    continue;
+                }
+                if (payload_len > sizeof(usn::apps::OrderRequest)) {
+                    std::cout << "[order_gateway] payload has trailing bytes, payload_len=" << payload_len
+                              << " expected=" << sizeof(usn::apps::OrderRequest) << "\n";
+                }
+
+                usn::apps::OrderRequest req{};
+                std::memcpy(&req, payload, sizeof(req));
                 std::cout << "[order_gateway] received order: client_order_id=" << req.client_order_id
                           << " instr=" << req.instrument_id << " side=" << static_cast<int>(req.side)
                           << " px=" << req.price << " qty=" << req.quantity << "\n";
 
-                // 骨架阶段先不回 ACK，只是展示收到的订单
+                auto it = conn_ctx.find(fd);
+                if (it != conn_ctx.end()) {
+                    it->second.tcp.recv_seq += static_cast<uint32_t>(payload_len);
+                    uint8_t dummy = 0;
+                    usn::Packet ack_packet = usn::TcpProtocol::create_data(
+                        it->second.tcp,
+                        &dummy,
+                        0
+                    );
+                    ssize_t nw = ::write(fd, ack_packet.data, ack_packet.len);
+                    delete[] ack_packet.data;
+                    if (nw != static_cast<ssize_t>(ack_packet.len)) {
+                        std::cerr << "[order_gateway] failed to send tcp ack, fd=" << fd << "\n";
+                    }
+                }
             }
         }
     }
 
-    ::close(epfd);
     ::close(listen_fd);
     return 0;
 }

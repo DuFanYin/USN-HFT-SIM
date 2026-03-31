@@ -6,11 +6,14 @@
 
 #include "../common/messages.hpp"
 
+#include <usn/protocol/udp_protocol.hpp>
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <cstring>
 #include <iostream>
 
@@ -68,16 +71,28 @@ int main() {
     uint64_t gaps         = 0;
 
     while (true) {
-        usn::apps::MarketDataIncrement m{};
-        ssize_t                        n = ::recv(fd, &m, sizeof(m), 0);
+        std::array<uint8_t, 2048> raw{};
+        ssize_t n = ::recv(fd, raw.data(), raw.size(), 0);
         if (n < 0) {
             std::perror("recv");
             break;
         }
-        if (n != static_cast<ssize_t>(sizeof(m))) {
-            std::cerr << "[feed_subscriber] partial recv\n";
+
+        usn::Packet udp_packet(raw.data(), static_cast<std::size_t>(n));
+        usn::UdpHeader header{};
+        const uint8_t* payload = nullptr;
+        std::size_t payload_len = 0;
+        if (!usn::UdpProtocol::parse(udp_packet, header, payload, payload_len)) {
+            std::cerr << "[feed_subscriber] invalid udp packet\n";
             continue;
         }
+        if (payload_len != sizeof(usn::apps::MarketDataIncrement)) {
+            std::cerr << "[feed_subscriber] unexpected payload size=" << payload_len << "\n";
+            continue;
+        }
+
+        usn::apps::MarketDataIncrement m{};
+        std::memcpy(&m, payload, sizeof(m));
 
         ++total;
         if (m.seq != expected_seq) {

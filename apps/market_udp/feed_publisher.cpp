@@ -5,13 +5,12 @@
 
 #include "../common/messages.hpp"
 
+#include <usn/protocol/udp_protocol.hpp>
+#include <usn/protocol/udp_socket.hpp>
+
 #include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <chrono>
-#include <cstring>
 #include <iostream>
 #include <thread>
 
@@ -19,34 +18,22 @@ namespace {
 
 // 典型行情组播网段示例（本地环境需要配置路由/组播支持）
 constexpr const char* kMulticastGroup = "239.0.0.1";
-constexpr int         kMulticastPort  = 9100;
-
-int create_multicast_socket(sockaddr_in& dst_addr) {
-    int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        std::perror("socket");
-        return -1;
-    }
-
-    int ttl = 1;
-    ::setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
-
-    std::memset(&dst_addr, 0, sizeof(dst_addr));
-    dst_addr.sin_family      = AF_INET;
-    dst_addr.sin_port        = htons(kMulticastPort);
-    dst_addr.sin_addr.s_addr = ::inet_addr(kMulticastGroup);
-
-    return fd;
-}
+constexpr int kMulticastPort = 9100;
+constexpr uint16_t kSrcPort = 9001;
+constexpr uint32_t kPublisherIp = 0x7F000001u;  // 127.0.0.1 (network order)
+constexpr uint32_t kGroupIp = 0xEF000001u;      // 239.0.0.1 (network order)
 
 }  // namespace
 
 int main() {
-    sockaddr_in dst{};
-    int         fd = create_multicast_socket(dst);
-    if (fd < 0) {
+    usn::UdpSocket socket;
+    if (!socket.create()) {
+        std::perror("socket");
         return 1;
     }
+
+    int ttl = 1;
+    ::setsockopt(socket.fd(), IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
 
     std::cout << "[feed_publisher] sending multicast to " << kMulticastGroup << ":" << kMulticastPort << "\n";
 
@@ -60,9 +47,20 @@ int main() {
         m.ask_price    = 100010;
         m.ask_qty      = 10;
 
-        ssize_t n = ::sendto(fd, &m, sizeof(m), 0,
-                             reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
-        if (n != static_cast<ssize_t>(sizeof(m))) {
+        usn::Packet packet = usn::UdpProtocol::encapsulate(
+            reinterpret_cast<const uint8_t*>(&m),
+            sizeof(m),
+            kSrcPort,
+            static_cast<uint16_t>(kMulticastPort),
+            kPublisherIp,
+            kGroupIp,
+            true
+        );
+
+        ssize_t n = socket.sendto(packet.data, packet.len, kMulticastGroup, static_cast<uint16_t>(kMulticastPort));
+        delete[] packet.data;
+
+        if (n != static_cast<ssize_t>(packet.len)) {
             if (n < 0) {
                 std::perror("sendto");
             } else {
@@ -75,7 +73,7 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
-    ::close(fd);
+    socket.close();
     return 0;
 }
 

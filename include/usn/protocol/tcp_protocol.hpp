@@ -116,6 +116,8 @@ struct TcpConnection {
 // TCP 协议处理类（简化版）
 class TcpProtocol {
 public:
+    static constexpr std::size_t kHeaderLen = 20;
+
     // 创建 SYN 数据包（三次握手 - 第一步）
     static Packet create_syn(
         uint16_t src_port,
@@ -137,7 +139,7 @@ public:
         header.checksum = 0;
         header.urgent_ptr = 0;
         
-        uint8_t* buffer = new uint8_t[sizeof(TcpHeader)];
+        uint8_t* buffer = new uint8_t[kHeaderLen];
         header.to_network_order();
         
         // 手动写入 header（正确处理 data_offset 和 flags）
@@ -147,10 +149,10 @@ public:
         std::memcpy(buffer + 14, reinterpret_cast<uint8_t*>(&header) + 14, 6);
         
         // 计算校验和
-        uint16_t checksum = calculate_checksum(buffer, sizeof(TcpHeader), src_ip, dst_ip);
+        uint16_t checksum = calculate_checksum(buffer, kHeaderLen, src_ip, dst_ip);
         *reinterpret_cast<uint16_t*>(buffer + 16) = htons(checksum);
         
-        return Packet(buffer, sizeof(TcpHeader));
+        return Packet(buffer, kHeaderLen);
     }
     
     // 创建 SYN-ACK 数据包（三次握手 - 第二步）
@@ -172,20 +174,22 @@ public:
         header.checksum = 0;
         header.urgent_ptr = 0;
         
-        uint8_t* buffer = new uint8_t[sizeof(TcpHeader)];
+        uint8_t* buffer = new uint8_t[kHeaderLen];
         header.to_network_order();
-        std::memcpy(buffer, &header, sizeof(TcpHeader));
+        std::memcpy(buffer, &header, 12);
+        buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);
+        buffer[13] = header.flags & 0xFF;
+        std::memcpy(buffer + 14, reinterpret_cast<uint8_t*>(&header) + 14, 6);
         
         header.checksum = calculate_checksum(
             buffer,
-            sizeof(TcpHeader),
+            kHeaderLen,
             conn.local_ip,
             conn.remote_ip
         );
-        header.to_network_order();
-        std::memcpy(buffer, &header, sizeof(TcpHeader));
+        *reinterpret_cast<uint16_t*>(buffer + 16) = htons(header.checksum);
         
-        return Packet(buffer, sizeof(TcpHeader));
+        return Packet(buffer, kHeaderLen);
     }
     
     // 创建 ACK 数据包
@@ -206,20 +210,22 @@ public:
         header.checksum = 0;
         header.urgent_ptr = 0;
         
-        uint8_t* buffer = new uint8_t[sizeof(TcpHeader)];
+        uint8_t* buffer = new uint8_t[kHeaderLen];
         header.to_network_order();
-        std::memcpy(buffer, &header, sizeof(TcpHeader));
+        std::memcpy(buffer, &header, 12);
+        buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);
+        buffer[13] = header.flags & 0xFF;
+        std::memcpy(buffer + 14, reinterpret_cast<uint8_t*>(&header) + 14, 6);
         
         header.checksum = calculate_checksum(
             buffer,
-            sizeof(TcpHeader),
+            kHeaderLen,
             conn.local_ip,
             conn.remote_ip
         );
-        header.to_network_order();
-        std::memcpy(buffer, &header, sizeof(TcpHeader));
+        *reinterpret_cast<uint16_t*>(buffer + 16) = htons(header.checksum);
         
-        return Packet(buffer, sizeof(TcpHeader));
+        return Packet(buffer, kHeaderLen);
     }
     
     // 创建数据包（带 payload）
@@ -228,7 +234,7 @@ public:
         const uint8_t* data,
         std::size_t len
     ) {
-        std::size_t total_len = sizeof(TcpHeader) + len;
+        std::size_t total_len = kHeaderLen + len;
         uint8_t* buffer = new uint8_t[total_len];
         
         TcpHeader header;
@@ -253,7 +259,7 @@ public:
         std::memcpy(buffer + 14, reinterpret_cast<uint8_t*>(&header) + 14, 6);
         
         // 拷贝数据
-        std::memcpy(buffer + sizeof(TcpHeader), data, len);
+        std::memcpy(buffer + kHeaderLen, data, len);
         
         // 计算校验和
         uint16_t checksum = calculate_checksum(
@@ -284,20 +290,22 @@ public:
         header.checksum = 0;
         header.urgent_ptr = 0;
         
-        uint8_t* buffer = new uint8_t[sizeof(TcpHeader)];
+        uint8_t* buffer = new uint8_t[kHeaderLen];
         header.to_network_order();
-        std::memcpy(buffer, &header, sizeof(TcpHeader));
+        std::memcpy(buffer, &header, 12);
+        buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);
+        buffer[13] = header.flags & 0xFF;
+        std::memcpy(buffer + 14, reinterpret_cast<uint8_t*>(&header) + 14, 6);
         
         header.checksum = calculate_checksum(
             buffer,
-            sizeof(TcpHeader),
+            kHeaderLen,
             conn.local_ip,
             conn.remote_ip
         );
-        header.to_network_order();
-        std::memcpy(buffer, &header, sizeof(TcpHeader));
+        *reinterpret_cast<uint16_t*>(buffer + 16) = htons(header.checksum);
         
-        return Packet(buffer, sizeof(TcpHeader));
+        return Packet(buffer, kHeaderLen);
     }
     
     // 解析 TCP 数据包
@@ -307,12 +315,13 @@ public:
         const uint8_t*& payload,
         std::size_t& payload_len
     ) {
-        if (packet.len < 20) {  // 最小 TCP header 长度
+        if (packet.len < kHeaderLen) {  // 最小 TCP header 长度
             return false;
         }
         
-        // 读取完整头部（packed 结构，直接 memcpy）
-        std::memcpy(&header, packet.data, sizeof(TcpHeader));
+        std::memset(&header, 0, sizeof(header));
+        std::memcpy(&header, packet.data, 12);
+        std::memcpy(reinterpret_cast<uint8_t*>(&header) + 14, packet.data + 14, 6);
         
         // 提取 data_offset（前 4 位）
         uint8_t data_offset_byte = reinterpret_cast<const uint8_t*>(packet.data)[12];
@@ -326,7 +335,7 @@ public:
         
         // 计算实际头部长度
         std::size_t header_len = header.data_offset * 4;
-        if (header_len < 20 || header_len > packet.len) {
+        if (header_len < kHeaderLen || header_len > packet.len) {
             return false;
         }
         
