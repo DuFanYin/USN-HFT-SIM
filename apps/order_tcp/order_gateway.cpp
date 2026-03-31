@@ -7,7 +7,10 @@
 
 #include "../common/messages.hpp"
 
+#include <usn/core/packet_ring.hpp>
 #include <usn/io/epoll_wrapper.hpp>
+#include <usn/optimization/numa_utils.hpp>
+#include <usn/optimization/zero_copy.hpp>
 #include <usn/protocol/tcp_protocol.hpp>
 
 #include <arpa/inet.h>
@@ -65,6 +68,8 @@ int create_listen_socket() {
 }  // namespace
 
 int main() {
+    usn::CpuAffinity::bind_to_cpu(0);
+
     int listen_fd = create_listen_socket();
     if (listen_fd < 0) {
         return 1;
@@ -84,6 +89,15 @@ int main() {
         ::close(listen_fd);
         return 1;
     }
+
+    // mmap 零拷贝内存池用于 ACK 发送缓冲区（避免热路径 malloc）
+    constexpr std::size_t kAckBufSize = usn::TcpProtocol::kHeaderLen + 16;
+    usn::ZeroCopyMemoryPool ack_pool(kAckBufSize, 128);
+    ack_pool.allocate();  // prefault 第一页
+    ack_pool.deallocate(ack_pool.allocate());
+
+    // 收到的请求先入 ring，再统一处理（I/O 与处理解耦）
+    usn::PacketRing req_ring(64);
 
     std::unordered_map<int, ConnectionContext> conn_ctx;
     std::vector<epoll_event> events;
@@ -133,6 +147,7 @@ int main() {
                           << " (fd=" << conn_fd << ")\n";
 
             } else {
+                // --- I/O 阶段：读取原始数据，push 到 ring ---
                 std::array<uint8_t, 2048> buf{};
                 ssize_t nread = ::read(fd, buf.data(), buf.size());
                 if (nread <= 0) {
@@ -149,42 +164,53 @@ int main() {
                 }
 
                 usn::Packet tcp_packet(buf.data(), static_cast<std::size_t>(nread));
-                usn::TcpHeader tcp_header{};
-                const uint8_t* payload = nullptr;
-                std::size_t payload_len = 0;
-                if (!usn::TcpProtocol::parse(tcp_packet, tcp_header, payload, payload_len)) {
-                    std::cerr << "[order_gateway] invalid tcp frame, fd=" << fd << "\n";
-                    continue;
-                }
-                if (payload_len < sizeof(usn::apps::OrderRequest)) {
-                    std::cerr << "[order_gateway] payload too small=" << payload_len << "\n";
-                    continue;
-                }
-                if (payload_len > sizeof(usn::apps::OrderRequest)) {
-                    std::cout << "[order_gateway] payload has trailing bytes, payload_len=" << payload_len
-                              << " expected=" << sizeof(usn::apps::OrderRequest) << "\n";
-                }
+                tcp_packet.port = static_cast<uint16_t>(fd);  // 携带 fd 信息
+                req_ring.try_push(tcp_packet);
+            }
+        }
 
-                usn::apps::OrderRequest req{};
-                std::memcpy(&req, payload, sizeof(req));
-                std::cout << "[order_gateway] received order: client_order_id=" << req.client_order_id
-                          << " instr=" << req.instrument_id << " side=" << static_cast<int>(req.side)
-                          << " px=" << req.price << " qty=" << req.quantity << "\n";
+        // --- 处理阶段：从 ring 取出请求，解析并回 ACK ---
+        usn::Packet pkt;
+        while (req_ring.try_pop(pkt)) {
+            int fd = static_cast<int>(pkt.port);
 
-                auto it = conn_ctx.find(fd);
-                if (it != conn_ctx.end()) {
-                    it->second.tcp.recv_seq += static_cast<uint32_t>(payload_len);
-                    uint8_t dummy = 0;
-                    usn::Packet ack_packet = usn::TcpProtocol::create_data(
-                        it->second.tcp,
-                        &dummy,
-                        0
-                    );
-                    ssize_t nw = ::write(fd, ack_packet.data, ack_packet.len);
-                    delete[] ack_packet.data;
-                    if (nw != static_cast<ssize_t>(ack_packet.len)) {
-                        std::cerr << "[order_gateway] failed to send tcp ack, fd=" << fd << "\n";
-                    }
+            usn::TcpHeader tcp_header{};
+            const uint8_t* payload = nullptr;
+            std::size_t payload_len = 0;
+            if (!usn::TcpProtocol::parse(pkt, tcp_header, payload, payload_len)) {
+                std::cerr << "[order_gateway] invalid tcp frame, fd=" << fd << "\n";
+                continue;
+            }
+            if (payload_len < sizeof(usn::apps::OrderRequest)) {
+                std::cerr << "[order_gateway] payload too small=" << payload_len << "\n";
+                continue;
+            }
+            if (payload_len > sizeof(usn::apps::OrderRequest)) {
+                std::cout << "[order_gateway] payload has trailing bytes, payload_len=" << payload_len
+                          << " expected=" << sizeof(usn::apps::OrderRequest) << "\n";
+            }
+
+            usn::apps::OrderRequest req{};
+            std::memcpy(&req, payload, sizeof(req));
+            std::cout << "[order_gateway] received order: client_order_id=" << req.client_order_id
+                      << " instr=" << req.instrument_id << " side=" << static_cast<int>(req.side)
+                      << " px=" << req.price << " qty=" << req.quantity << "\n";
+
+            auto it = conn_ctx.find(fd);
+            if (it != conn_ctx.end()) {
+                it->second.tcp.recv_seq += static_cast<uint32_t>(payload_len);
+                uint8_t dummy = 0;
+                uint8_t* ack_buf = ack_pool.allocate();
+                usn::Packet ack_packet = usn::TcpProtocol::create_data(
+                    it->second.tcp,
+                    &dummy,
+                    0,
+                    ack_buf
+                );
+                ssize_t nw = ::write(fd, ack_packet.data, ack_packet.len);
+                ack_pool.deallocate(ack_packet.data);
+                if (nw != static_cast<ssize_t>(ack_packet.len)) {
+                    std::cerr << "[order_gateway] failed to send tcp ack, fd=" << fd << "\n";
                 }
             }
         }

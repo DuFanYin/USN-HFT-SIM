@@ -17,8 +17,9 @@
 
 ## PENDING
 
-- [ ] todo-02-udp-spec-and-parser
-  - 为 UDP 模块写清晰的“协议语义规格”：校验和/长度/端口处理策略；实现并固化 UDP 报文解析与序列化路径（含边界条件与错误处理）。
+- [x] todo-02-udp-spec-and-parser ✅
+  - 为 UDP 模块写清晰的”协议语义规格”：校验和/长度/端口处理策略；实现并固化 UDP 报文解析与序列化路径（含边界条件与错误处理）。
+  - **已完成**：`UdpProtocol` 实现了 encapsulate/parse/verify_checksum 完整路径，含伪首部校验和、长度校验、边界检查；测试已覆盖。
 
 - [ ] todo-03-udp-jitter-timers
   - 补齐 UDP 端到端语义：乱序/丢包的检测与上层反馈接口设计（即使不做重传，也要让上层能感知）。
@@ -26,8 +27,9 @@
 - [ ] todo-04-recv-send-interruptibility
   - 统一 IO 的可取消/可超时语义：为 batch recv/send 与事件驱动（epoll/io_uring/busy poll）加入超时、取消点、错误码体系。
 
-- [ ] todo-05-packet-ring-contract
+- [x] todo-05-packet-ring-contract ✅（部分）
   - 给 Packet / packet ring buffer 定义严格契约：生命周期、对齐、可见性/内存序、零拷贝语义（谁拥有内存、何时释放/回收）。并加入契约测试。
+  - **已完成部分**：协议函数已去掉内部 `new[]`，强制调用方通过 MemoryPool/ZeroCopyMemoryPool 传入 buffer，生命周期由池管理；PacketRing 已在 gateway 和 subscriber 中实际使用。剩余：契约测试尚未补齐。
 
 - [ ] todo-06-connectionless-debugging
   - 增加网络调试能力：可选的 tracing/采样（packet id、时间戳、queue latency、syscall batching stats），并让测试可稳定复现。
@@ -71,11 +73,13 @@
 - [ ] todo-19-documentation-for-learning
   - 为“完整理解计算机网络”补齐文档：写清每一步为什么这么做（状态机图、序号图、窗口图、重传时序图），并把文档与测试用例绑定。
 
-- [ ] todo-20-examples-tcp-end-to-end
+- [x] todo-20-examples-tcp-end-to-end ✅
   - 补齐端到端示例：至少一个 UDP 发送/接收示例 + 一个 TCP 客户端/服务端示例（可在本机/容器内跑），并在 README 中写清运行方式。
+  - **已完成**：`run_sim_market`（UDP 组播行情收发）和 `run_sim_order`（TCP 订单请求-应答），均可本机运行；行为说明见 `docs/RUN_SIM_MARKET.md` 和 `docs/RUN_SIM_ORDER.md`。
 
-- [ ] todo-21-build-and-deps-portability
+- [x] todo-21-build-and-deps-portability ✅（部分）
   - 构建/依赖可靠性：对 Linux 依赖项做检查与编译选项（io_uring/liburing、numa/libnuma），提升可迁移性与错误提示。
+  - **已完成部分**：CMake 已对 libnuma/liburing 做 find 检查并链接；项目已限定 Linux-only 编译路径。剩余：缺失时的友好错误提示可进一步完善。
 
 - [ ] todo-22-ci-basic
   - 基础 CI：至少跑单元测试 + 关键集成测试（TCP 握手/数据收发/关闭等），并生成性能基线（可选，轻量级）。

@@ -6,6 +6,8 @@
 
 #include "../common/messages.hpp"
 
+#include <usn/core/memory_pool.hpp>
+#include <usn/optimization/numa_utils.hpp>
 #include <usn/protocol/tcp_protocol.hpp>
 
 #include <arpa/inet.h>
@@ -59,12 +61,18 @@ int connect_to_gateway() {
 }  // namespace
 
 int main() {
+    usn::CpuAffinity::bind_to_cpu(1);
+
     int fd = connect_to_gateway();
     if (fd < 0) {
         return 1;
     }
 
     std::cout << "[order_client] connected to " << kGatewayIp << ":" << kGatewayPort << "\n";
+
+    // 预分配内存池：每块足够容纳 TCP header(20) + OrderRequest
+    constexpr std::size_t kPacketBufSize = usn::TcpProtocol::kHeaderLen + sizeof(usn::apps::OrderRequest) + 16;
+    usn::MemoryPool pool(kPacketBufSize, 64);
 
     usn::TcpConnection conn{};
     conn.local_ip = htonl(INADDR_LOOPBACK);
@@ -83,13 +91,15 @@ int main() {
         req.price           = 100000 + static_cast<uint32_t>(order_id % 100);  // 1000.00x
         req.quantity        = 1;
 
+        uint8_t* buf = pool.allocate();
         usn::Packet packet = usn::TcpProtocol::create_data(
             conn,
             reinterpret_cast<const uint8_t*>(&req),
-            sizeof(req)
+            sizeof(req),
+            buf
         );
         ssize_t n = ::write(fd, packet.data, packet.len);
-        delete[] packet.data;
+        pool.deallocate(packet.data);
         if (n != static_cast<ssize_t>(packet.len)) {
             if (n < 0) {
                 std::perror("write");

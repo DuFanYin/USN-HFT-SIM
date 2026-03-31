@@ -2,111 +2,76 @@
 //
 // UDP 协议栈基础测试
 
+#include <usn/core/memory_pool.hpp>
 #include <usn/protocol/udp_protocol.hpp>
-#include <cassert>
-#include <iostream>
+#include <gtest/gtest.h>
+#include <array>
 #include <cstring>
 
 using namespace usn;
 
-void test_udp_encapsulate() {
-    std::cout << "[TEST] UDP Encapsulate\n";
-    
+class UdpProtocolTest : public ::testing::Test {
+protected:
+    MemoryPool pool{256, 16};
+};
+
+TEST_F(UdpProtocolTest, Encapsulate) {
     const char* payload = "Hello, UDP!";
     std::size_t payload_len = std::strlen(payload);
-    
+
+    std::array<uint8_t, 256> buffer{};
+
     Packet packet = UdpProtocol::encapsulate(
         reinterpret_cast<const uint8_t*>(payload),
-        payload_len,
-        12345,  // src port
-        54321,  // dst port
-        0, 0,   // IP addresses (skip checksum)
-        false   // don't calculate checksum
+        payload_len, 12345, 54321, 0, 0, false,
+        buffer.data()
     );
-    
-    assert(packet.len == sizeof(UdpHeader) + payload_len);
-    
-    // 解析验证
+
+    EXPECT_EQ(packet.len, sizeof(UdpHeader) + payload_len);
+
     UdpHeader header;
     const uint8_t* parsed_payload;
     std::size_t parsed_len;
-    
-    bool success = UdpProtocol::parse(packet, header, parsed_payload, parsed_len);
-    assert(success);
-    assert(header.source_port == 12345);
-    assert(header.dest_port == 54321);
-    assert(parsed_len == payload_len);
-    assert(std::memcmp(parsed_payload, payload, payload_len) == 0);
-    
-    delete[] packet.data;
-    std::cout << "  ✓ UDP Encapsulate test passed\n";
+
+    ASSERT_TRUE(UdpProtocol::parse(packet, header, parsed_payload, parsed_len));
+    EXPECT_EQ(header.source_port, 12345);
+    EXPECT_EQ(header.dest_port, 54321);
+    EXPECT_EQ(parsed_len, payload_len);
+    EXPECT_EQ(std::memcmp(parsed_payload, payload, payload_len), 0);
 }
 
-void test_udp_parse() {
-    std::cout << "[TEST] UDP Parse\n";
-    
-    // 创建 UDP 数据包
+TEST_F(UdpProtocolTest, Parse) {
     const char* payload = "Test payload";
+    std::array<uint8_t, 256> buffer{};
+
     Packet packet = UdpProtocol::encapsulate(
         reinterpret_cast<const uint8_t*>(payload),
-        std::strlen(payload),
-        1000,
-        2000,
-        0, 0,
-        false
+        std::strlen(payload), 1000, 2000, 0, 0, false,
+        buffer.data()
     );
-    
-    // 解析
+
     UdpHeader header;
     const uint8_t* parsed_payload;
     std::size_t parsed_len;
-    
-    bool success = UdpProtocol::parse(packet, header, parsed_payload, parsed_len);
-    assert(success);
-    assert(header.source_port == 1000);
-    assert(header.dest_port == 2000);
-    
-    delete[] packet.data;
-    std::cout << "  ✓ UDP Parse test passed\n";
+
+    ASSERT_TRUE(UdpProtocol::parse(packet, header, parsed_payload, parsed_len));
+    EXPECT_EQ(header.source_port, 1000);
+    EXPECT_EQ(header.dest_port, 2000);
 }
 
-void test_udp_checksum() {
-    std::cout << "[TEST] UDP Checksum\n";
-    
+TEST_F(UdpProtocolTest, Checksum) {
     const char* payload = "Checksum test";
     uint32_t src_ip = inet_addr("192.168.1.1");
     uint32_t dst_ip = inet_addr("192.168.1.2");
-    
+
+    std::array<uint8_t, 256> buffer{};
+
     Packet packet = UdpProtocol::encapsulate(
         reinterpret_cast<const uint8_t*>(payload),
-        std::strlen(payload),
-        1234,
-        5678,
-        src_ip,
-        dst_ip,
-        true  // calculate checksum
+        std::strlen(payload), 1234, 5678,
+        src_ip, dst_ip, true,
+        buffer.data()
     );
-    
-    // 验证校验和
-    bool valid = UdpProtocol::verify_checksum(packet, src_ip, dst_ip);
-    assert(valid);
-    
-    delete[] packet.data;
-    std::cout << "  ✓ UDP Checksum test passed\n";
-}
 
-int main() {
-    std::cout << "Running UDP Protocol tests...\n\n";
-    
-    try {
-        test_udp_encapsulate();
-        test_udp_parse();
-        test_udp_checksum();
-        
-        std::cout << "\n✅ All tests passed!\n";
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "\n❌ Test failed: " << e.what() << "\n";
-        return 1;
-    }
+    EXPECT_TRUE(UdpProtocol::verify_checksum(packet, src_ip, dst_ip));
 }

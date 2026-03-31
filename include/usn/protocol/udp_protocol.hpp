@@ -100,19 +100,20 @@ public:
     }
     
     // 封装 UDP 数据包
-    // 返回封装后的数据包（包含 UDP 头部）
+    // 调用方必须提供足够大的 out_buffer（>= sizeof(UdpHeader) + payload_len）
     static Packet encapsulate(
         const uint8_t* payload,
         std::size_t payload_len,
         uint16_t src_port,
         uint16_t dst_port,
-        uint32_t src_ip = 0,
-        uint32_t dst_ip = 0,
-        bool calculate_checksum_flag = true
+        uint32_t src_ip,
+        uint32_t dst_ip,
+        bool calculate_checksum_flag,
+        uint8_t* out_buffer
     ) {
         // 分配缓冲区（UDP 头部 + 数据）
         std::size_t total_len = sizeof(UdpHeader) + payload_len;
-        uint8_t* buffer = new uint8_t[total_len];
+        uint8_t* buffer = out_buffer;
         
         // 构建 UDP 头部
         UdpHeader header;

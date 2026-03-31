@@ -119,16 +119,18 @@ public:
     static constexpr std::size_t kHeaderLen = 20;
 
     // 创建 SYN 数据包（三次握手 - 第一步）
+    // 调用方必须提供足够大的 out_buffer（>= kHeaderLen）
     static Packet create_syn(
         uint16_t src_port,
         uint16_t dst_port,
         uint32_t src_ip,
         uint32_t dst_ip,
-        uint32_t seq_num
+        uint32_t seq_num,
+        uint8_t* out_buffer
     ) {
         TcpHeader header;
         std::memset(&header, 0, sizeof(header));
-        
+
         header.source_port = src_port;
         header.dest_port = dst_port;
         header.seq_num = seq_num;
@@ -138,8 +140,8 @@ public:
         header.window = 65535;
         header.checksum = 0;
         header.urgent_ptr = 0;
-        
-        uint8_t* buffer = new uint8_t[kHeaderLen];
+
+        uint8_t* buffer = out_buffer;
         header.to_network_order();
         
         // 手动写入 header（正确处理 data_offset 和 flags）
@@ -159,11 +161,12 @@ public:
     static Packet create_syn_ack(
         const TcpConnection& conn,
         uint32_t seq_num,
-        uint32_t ack_num
+        uint32_t ack_num,
+        uint8_t* out_buffer
     ) {
         TcpHeader header;
         std::memset(&header, 0, sizeof(header));
-        
+
         header.source_port = conn.local_port;
         header.dest_port = conn.remote_port;
         header.seq_num = seq_num;
@@ -173,8 +176,8 @@ public:
         header.window = conn.window_size;
         header.checksum = 0;
         header.urgent_ptr = 0;
-        
-        uint8_t* buffer = new uint8_t[kHeaderLen];
+
+        uint8_t* buffer = out_buffer;
         header.to_network_order();
         std::memcpy(buffer, &header, 12);
         buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);
@@ -195,11 +198,12 @@ public:
     // 创建 ACK 数据包
     static Packet create_ack(
         const TcpConnection& conn,
-        uint32_t ack_num
+        uint32_t ack_num,
+        uint8_t* out_buffer
     ) {
         TcpHeader header;
         std::memset(&header, 0, sizeof(header));
-        
+
         header.source_port = conn.local_port;
         header.dest_port = conn.remote_port;
         header.seq_num = conn.send_seq;
@@ -209,8 +213,8 @@ public:
         header.window = conn.window_size;
         header.checksum = 0;
         header.urgent_ptr = 0;
-        
-        uint8_t* buffer = new uint8_t[kHeaderLen];
+
+        uint8_t* buffer = out_buffer;
         header.to_network_order();
         std::memcpy(buffer, &header, 12);
         buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);
@@ -229,13 +233,15 @@ public:
     }
     
     // 创建数据包（带 payload）
+    // 调用方必须提供足够大的 out_buffer（>= kHeaderLen + len）
     static Packet create_data(
         const TcpConnection& conn,
         const uint8_t* data,
-        std::size_t len
+        std::size_t len,
+        uint8_t* out_buffer
     ) {
         std::size_t total_len = kHeaderLen + len;
-        uint8_t* buffer = new uint8_t[total_len];
+        uint8_t* buffer = out_buffer;
         
         TcpHeader header;
         std::memset(&header, 0, sizeof(header));
@@ -275,11 +281,12 @@ public:
     
     // 创建 FIN 数据包
     static Packet create_fin(
-        const TcpConnection& conn
+        const TcpConnection& conn,
+        uint8_t* out_buffer
     ) {
         TcpHeader header;
         std::memset(&header, 0, sizeof(header));
-        
+
         header.source_port = conn.local_port;
         header.dest_port = conn.remote_port;
         header.seq_num = conn.send_seq;
@@ -289,8 +296,8 @@ public:
         header.window = conn.window_size;
         header.checksum = 0;
         header.urgent_ptr = 0;
-        
-        uint8_t* buffer = new uint8_t[kHeaderLen];
+
+        uint8_t* buffer = out_buffer;
         header.to_network_order();
         std::memcpy(buffer, &header, 12);
         buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);

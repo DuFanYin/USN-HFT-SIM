@@ -7,8 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # 编译选项
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O3 -march=native")
-set(CMAKE_CXX_FLAGS_RELEASE "-DNDEBUG -O3 -march=native")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2 -march=native")
+set(CMAKE_CXX_FLAGS_RELEASE "-DNDEBUG -O2 -march=native")
 
 # 选项
 option(USN_BUILD_TESTS "Build unit tests" ON)
@@ -47,6 +47,7 @@ target_include_directories(usn_core
 # 测试
 if(USN_BUILD_TESTS)
     enable_testing()
+    find_package(GTest REQUIRED)
     add_subdirectory(tests)
 endif()
 
@@ -54,9 +55,6 @@ endif()
 if(USN_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif()
-
-# 示例程序
-add_subdirectory(examples)
 
 # 应用程序
 add_subdirectory(apps)
