@@ -3,7 +3,7 @@
 // UDP 行情发布端骨架（组播）：
 // - 周期性向组播地址发送带 seq 的 MarketDataIncrement
 
-#include "../common/messages.hpp"
+#include <usn/apps/messages.hpp>
 
 #include <usn/core/memory_pool.hpp>
 #include <usn/optimization/numa_utils.hpp>

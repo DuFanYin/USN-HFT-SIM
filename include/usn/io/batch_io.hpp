@@ -17,21 +17,43 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <linux/socket.h>
+#include <poll.h>
+#include <atomic>
+#include <algorithm>
 #include <cerrno>
 #include <cstddef>
+#include <chrono>
 #include <span>
+#include <thread>
 #include <vector>
 
 namespace usn {
+
+enum class BatchIOStatus {
+    Ok,
+    Timeout,
+    Cancelled,
+    WouldBlock,
+    SysError
+};
 
 // Batch I/O 结果
 struct BatchIOResult {
     std::size_t count;      // 成功处理的数量
     int error;              // 错误码（如果有）
+    BatchIOStatus status;   // 统一状态
     
     bool success() const noexcept {
-        return error == 0;
+        return error == 0 && status != BatchIOStatus::SysError;
     }
+};
+
+struct BatchIOOptions {
+    // <0: wait indefinitely, 0: immediate, >0: bounded wait
+    // Default keeps existing non-blocking behavior.
+    int timeout_ms{0};
+    const std::atomic<bool>* cancel_flag{nullptr};
+    int poll_interval_ms{1};
 };
 
 // Batch Recv - 批量接收 UDP 数据包
@@ -44,8 +66,12 @@ public:
     // 批量接收数据包到 ring buffer
     // 返回实际接收的数量
     BatchIOResult recv_batch(PacketRing& ring, std::size_t max_packets) {
+        return recv_batch(ring, max_packets, BatchIOOptions{});
+    }
+
+    BatchIOResult recv_batch(PacketRing& ring, std::size_t max_packets, const BatchIOOptions& options) {
         if (max_packets == 0) {
-            return {0, 0};
+            return {0, 0, BatchIOStatus::Ok};
         }
         
         // 准备临时缓冲区用于接收
@@ -76,19 +102,23 @@ public:
         
         // 使用 recvmmsg（Linux）
         const unsigned int msg_count = static_cast<unsigned int>(max_packets);
-        int received = recvmmsg(
-            socket_fd_,
-            temp_msghdrs_.data(),
-            msg_count,
-            MSG_DONTWAIT,  // 非阻塞
-            nullptr
-        );
+        int received = recvmmsg_with_policy(msg_count, options);
         
         if (received < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return {0, 0};  // 没有数据可读，不是错误
+            const int err = errno;
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                return {0, 0, BatchIOStatus::WouldBlock};
             }
-            return {0, errno};
+            return {0, err, BatchIOStatus::SysError};
+        }
+        if (received == 0) {
+            if (options.cancel_flag != nullptr && options.cancel_flag->load(std::memory_order_acquire)) {
+                return {0, 0, BatchIOStatus::Cancelled};
+            }
+            if (options.timeout_ms > 0) {
+                return {0, 0, BatchIOStatus::Timeout};
+            }
+            return {0, 0, BatchIOStatus::WouldBlock};
         }
         
         // 将接收到的数据包添加到 ring buffer
@@ -108,13 +138,17 @@ public:
             }
         }
         
-        return {added, 0};
+        return {added, 0, BatchIOStatus::Ok};
     }
     
     // 批量接收数据包到数组
     BatchIOResult recv_batch(std::span<Packet> packets) {
+        return recv_batch(packets, BatchIOOptions{});
+    }
+
+    BatchIOResult recv_batch(std::span<Packet> packets, const BatchIOOptions& options) {
         if (packets.empty()) {
-            return {0, 0};
+            return {0, 0, BatchIOStatus::Ok};
         }
         
         // 准备缓冲区
@@ -139,19 +173,23 @@ public:
         }
         
         const unsigned int msg_count = static_cast<unsigned int>(packets.size());
-        int received = recvmmsg(
-            socket_fd_,
-            temp_msghdrs_.data(),
-            msg_count,
-            MSG_DONTWAIT,
-            nullptr
-        );
+        int received = recvmmsg_with_policy(msg_count, options);
         
         if (received < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return {0, 0};
+            const int err = errno;
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                return {0, 0, BatchIOStatus::WouldBlock};
             }
-            return {0, errno};
+            return {0, err, BatchIOStatus::SysError};
+        }
+        if (received == 0) {
+            if (options.cancel_flag != nullptr && options.cancel_flag->load(std::memory_order_acquire)) {
+                return {0, 0, BatchIOStatus::Cancelled};
+            }
+            if (options.timeout_ms > 0) {
+                return {0, 0, BatchIOStatus::Timeout};
+            }
+            return {0, 0, BatchIOStatus::WouldBlock};
         }
         
         for (int i = 0; i < received; ++i) {
@@ -162,10 +200,60 @@ public:
             );
         }
         
-        return {static_cast<std::size_t>(received), 0};
+        return {static_cast<std::size_t>(received), 0, BatchIOStatus::Ok};
     }
 
 private:
+    int recvmmsg_with_policy(unsigned int msg_count, const BatchIOOptions& options) {
+        if (options.cancel_flag != nullptr && options.cancel_flag->load(std::memory_order_acquire)) {
+            return 0;
+        }
+
+        auto remaining_ms = options.timeout_ms;
+        while (true) {
+            int received = recvmmsg(
+                socket_fd_,
+                temp_msghdrs_.data(),
+                msg_count,
+                MSG_DONTWAIT,
+                nullptr
+            );
+            if (received >= 0) {
+                return received;
+            }
+
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                return -1;
+            }
+
+            if (options.timeout_ms == 0) {
+                return 0;
+            }
+
+            if (options.cancel_flag != nullptr && options.cancel_flag->load(std::memory_order_acquire)) {
+                return 0;
+            }
+
+            int wait_ms = options.poll_interval_ms > 0 ? options.poll_interval_ms : 1;
+            if (options.timeout_ms > 0) {
+                if (remaining_ms <= 0) {
+                    return 0;
+                }
+                wait_ms = std::min(wait_ms, remaining_ms);
+                remaining_ms -= wait_ms;
+            }
+
+            pollfd pfd{};
+            pfd.fd = socket_fd_;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            const int ret = poll(&pfd, 1, wait_ms);
+            if (ret < 0 && errno != EINTR) {
+                return -1;
+            }
+        }
+    }
+
     int socket_fd_;
     std::vector<Packet> temp_packets_;
     std::vector<std::vector<uint8_t>> temp_buffers_;
@@ -182,8 +270,12 @@ public:
     
     // 批量发送数据包
     BatchIOResult send_batch(std::span<const Packet> packets) {
+        return send_batch(packets, BatchIOOptions{});
+    }
+
+    BatchIOResult send_batch(std::span<const Packet> packets, const BatchIOOptions& options) {
         if (packets.empty()) {
-            return {0, 0};
+            return {0, 0, BatchIOStatus::Ok};
         }
         
         // 准备 msghdr 和 iovec
@@ -207,24 +299,78 @@ public:
         
         // 使用 sendmmsg（Linux）
         const unsigned int msg_count = static_cast<unsigned int>(packets.size());
-        int sent = sendmmsg(
-            socket_fd_,
-            temp_msghdrs_.data(),
-            msg_count,
-            MSG_DONTWAIT
-        );
+        int sent = sendmmsg_with_policy(msg_count, options);
         
         if (sent < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return {0, 0};  // 发送缓冲区满，不是错误
+            const int err = errno;
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                return {0, 0, BatchIOStatus::WouldBlock};
             }
-            return {0, errno};
+            return {0, err, BatchIOStatus::SysError};
+        }
+        if (sent == 0) {
+            if (options.cancel_flag != nullptr && options.cancel_flag->load(std::memory_order_acquire)) {
+                return {0, 0, BatchIOStatus::Cancelled};
+            }
+            if (options.timeout_ms > 0) {
+                return {0, 0, BatchIOStatus::Timeout};
+            }
+            return {0, 0, BatchIOStatus::WouldBlock};
         }
         
-        return {static_cast<std::size_t>(sent), 0};
+        return {static_cast<std::size_t>(sent), 0, BatchIOStatus::Ok};
     }
 
 private:
+    int sendmmsg_with_policy(unsigned int msg_count, const BatchIOOptions& options) {
+        if (options.cancel_flag != nullptr && options.cancel_flag->load(std::memory_order_acquire)) {
+            return 0;
+        }
+
+        auto remaining_ms = options.timeout_ms;
+        while (true) {
+            int sent = sendmmsg(
+                socket_fd_,
+                temp_msghdrs_.data(),
+                msg_count,
+                MSG_DONTWAIT
+            );
+            if (sent >= 0) {
+                return sent;
+            }
+
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                return -1;
+            }
+
+            if (options.timeout_ms == 0) {
+                return 0;
+            }
+
+            if (options.cancel_flag != nullptr && options.cancel_flag->load(std::memory_order_acquire)) {
+                return 0;
+            }
+
+            int wait_ms = options.poll_interval_ms > 0 ? options.poll_interval_ms : 1;
+            if (options.timeout_ms > 0) {
+                if (remaining_ms <= 0) {
+                    return 0;
+                }
+                wait_ms = std::min(wait_ms, remaining_ms);
+                remaining_ms -= wait_ms;
+            }
+
+            pollfd pfd{};
+            pfd.fd = socket_fd_;
+            pfd.events = POLLOUT;
+            pfd.revents = 0;
+            const int ret = poll(&pfd, 1, wait_ms);
+            if (ret < 0 && errno != EINTR) {
+                return -1;
+            }
+        }
+    }
+
     int socket_fd_;
     std::vector<struct mmsghdr> temp_msghdrs_;
     std::vector<struct iovec> temp_iovecs_;

@@ -6,12 +6,15 @@
 // - 通过 BusyPoller 低延迟轮询
 // - 接收 MarketDataIncrement，做简单的 seq 连续性统计
 
-#include "../common/messages.hpp"
+#include <usn/apps/messages.hpp>
 
 #include <usn/core/packet_ring.hpp>
+#include <usn/core/tracing.hpp>
 #include <usn/io/batch_io.hpp>
 #include <usn/io/busy_poll.hpp>
+#include <usn/io/io_status.hpp>
 #include <usn/optimization/numa_utils.hpp>
+#include <usn/protocol/udp_feedback.hpp>
 #include <usn/protocol/udp_protocol.hpp>
 
 #include <arpa/inet.h>
@@ -95,6 +98,7 @@ int main(int argc, char** argv) {
     usn::CpuAffinity::bind_to_cpu(1);
     int subscriber_id = 0;
     int artificial_delay_ms = 0;
+    int trace_every = 0;
     std::string summary_file;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::string key = argv[i];
@@ -106,6 +110,8 @@ int main(int argc, char** argv) {
             artificial_delay_ms = std::max(0, val);
         } else if (key == "--summary-file") {
             summary_file = argv[i + 1];
+        } else if (key == "--trace-every") {
+            trace_every = std::max(0, std::atoi(argv[i + 1]));
         }
     }
 
@@ -122,12 +128,9 @@ int main(int argc, char** argv) {
     // 批量接收 + 环形缓冲区
     usn::BatchRecv batch_recv(fd);
     usn::PacketRing ring(64);
+    usn::Tracer tracer(usn::TraceConfig{trace_every > 0, static_cast<uint32_t>(std::max(1, trace_every))});
 
-    uint64_t expected_seq = 1;
-    uint64_t total        = 0;
-    uint64_t gaps         = 0;
-    uint64_t reorder_events = 0;
-    uint64_t max_reorder_depth = 0;
+    usn::UdpDeliveryFeedback feedback{};
     std::vector<uint64_t> latency_us_samples;
     latency_us_samples.reserve(1 << 14);
     auto last_report = std::chrono::steady_clock::now();
@@ -149,18 +152,7 @@ int main(int argc, char** argv) {
         usn::apps::MarketDataIncrement m{};
         std::memcpy(&m, payload, sizeof(m));
 
-        ++total;
-        if (m.seq != expected_seq) {
-            if (m.seq > expected_seq) {
-                gaps += (m.seq - expected_seq);
-                expected_seq = m.seq + 1;
-            } else {
-                ++reorder_events;
-                max_reorder_depth = std::max(max_reorder_depth, expected_seq - m.seq);
-            }
-        } else {
-            ++expected_seq;
-        }
+        feedback.observe(m.seq);
 
         if (artificial_delay_ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(artificial_delay_ms));
@@ -173,15 +165,23 @@ int main(int argc, char** argv) {
         );
         if (now_ns >= m.send_ts_ns) {
             latency_us_samples.push_back((now_ns - m.send_ts_ns) / 1000u);
+            tracer.emit(
+                "feed_subscriber",
+                "udp_rx",
+                m.seq,
+                now_ns,
+                ring.size(),
+                (now_ns - m.send_ts_ns) / 1000u
+            );
         }
 
         const auto now = std::chrono::steady_clock::now();
         if (now - last_report >= std::chrono::seconds(1)) {
             std::cout << "[feed_subscriber][metrics] id=" << subscriber_id
-                      << " recv_total=" << total
-                      << " gaps=" << gaps
-                      << " reorder_events=" << reorder_events
-                      << " max_reorder_depth=" << max_reorder_depth
+                      << " recv_total=" << feedback.total
+                      << " gaps=" << feedback.gaps
+                      << " reorder_events=" << feedback.reorder_events
+                      << " max_reorder_depth=" << feedback.max_reorder_depth
                       << " latency_p50_us=" << percentile_us(latency_us_samples, 0.50)
                       << " latency_p99_us=" << percentile_us(latency_us_samples, 0.99)
                       << " latency_p999_us=" << percentile_us(latency_us_samples, 0.999)
@@ -198,35 +198,60 @@ int main(int argc, char** argv) {
 
     usn::BusyPoller poller(poll_cfg);
 
-    poller.start(
+    usn::BusyPollControl control{};
+    control.cancel_flag = &g_running;
+
+    auto poll_result = poller.start_with_control(
         [&]() -> bool {
             if (!g_running.load(std::memory_order_acquire)) {
                 poller.stop();
                 return false;
             }
-            // 批量接收到 ring
-            auto result = batch_recv.recv_batch(ring, 16);
 
-            // 从 ring 取出并处理
+            usn::BatchIOOptions options;
+            options.cancel_flag = &g_running;
+            options.timeout_ms = 0;
+
+            auto batch_result = batch_recv.recv_batch(ring, 16, options);
+            const auto io_result = usn::to_unified_result(batch_result);
+            if (io_result.status == usn::UnifiedIOStatus::SysError) {
+                std::cerr << "[feed_subscriber] batch_recv sys error errno=" << io_result.error << "\n";
+                g_running.store(false, std::memory_order_release);
+                poller.stop();
+                return false;
+            }
+            if (usn::classify_loop_control(io_result) == usn::LoopControl::Stop &&
+                io_result.status != usn::UnifiedIOStatus::Cancelled) {
+                poller.stop();
+                return false;
+            }
+
             usn::Packet pkt;
             bool got_data = false;
             while (ring.try_pop(pkt)) {
                 process_packet(pkt);
                 got_data = true;
             }
-            return got_data || result.count > 0;
+            return got_data || io_result.count > 0;
         },
         [&]() {
             // 空闲回调：自适应调整轮询间隔
             poller.adaptive_adjust();
-        }
+        },
+        control
     );
 
+    auto unified_poll = usn::to_unified_result(poll_result);
+    std::cout << "[feed_subscriber] busy poll stopped with status="
+              << static_cast<int>(unified_poll.status)
+              << " iterations=" << poll_result.iterations
+              << " data_hits=" << poll_result.data_hits << "\n";
+
     std::cout << "[feed_subscriber][final] id=" << subscriber_id
-              << " recv_total=" << total
-              << " gaps=" << gaps
-              << " reorder_events=" << reorder_events
-              << " max_reorder_depth=" << max_reorder_depth
+              << " recv_total=" << feedback.total
+              << " gaps=" << feedback.gaps
+              << " reorder_events=" << feedback.reorder_events
+              << " max_reorder_depth=" << feedback.max_reorder_depth
               << " latency_p50_us=" << percentile_us(latency_us_samples, 0.50)
               << " latency_p99_us=" << percentile_us(latency_us_samples, 0.99)
               << " latency_p999_us=" << percentile_us(latency_us_samples, 0.999)
@@ -235,10 +260,10 @@ int main(int argc, char** argv) {
         std::ofstream out(summary_file, std::ios::trunc);
         if (out.good()) {
             out << "id=" << subscriber_id
-                << " recv_total=" << total
-                << " gaps=" << gaps
-                << " reorder_events=" << reorder_events
-                << " max_reorder_depth=" << max_reorder_depth
+                << " recv_total=" << feedback.total
+                << " gaps=" << feedback.gaps
+                << " reorder_events=" << feedback.reorder_events
+                << " max_reorder_depth=" << feedback.max_reorder_depth
                 << " latency_p50_us=" << percentile_us(latency_us_samples, 0.50)
                 << " latency_p99_us=" << percentile_us(latency_us_samples, 0.99)
                 << " latency_p999_us=" << percentile_us(latency_us_samples, 0.999)

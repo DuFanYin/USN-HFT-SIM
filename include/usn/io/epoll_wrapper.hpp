@@ -10,8 +10,12 @@
 #pragma once
 
 #include <unistd.h>
+#include <atomic>
 #include <cerrno>
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 #include <vector>
 #include <functional>
 #include <sys/epoll.h>
@@ -30,6 +34,30 @@ enum class EpollEventType : std::uint32_t {
 
 // Epoll 事件回调函数类型
 using EpollCallback = std::function<void(int fd, uint32_t events)>;
+
+enum class EpollWaitStatus {
+    Ok,
+    Timeout,
+    Cancelled,
+    SysError
+};
+
+struct EpollWaitOptions {
+    // <0: wait indefinitely, 0: immediate, >0: bounded wait
+    int timeout_ms{-1};
+    const std::atomic<bool>* cancel_flag{nullptr};
+    int poll_interval_ms{5};
+};
+
+struct EpollWaitResult {
+    int count{0};
+    int error{0};
+    EpollWaitStatus status{EpollWaitStatus::Ok};
+
+    bool success() const noexcept {
+        return status != EpollWaitStatus::SysError;
+    }
+};
 
 // Epoll 封装类
 class EpollWrapper {
@@ -76,14 +104,75 @@ public:
     
     // 等待事件（阻塞）
     int wait(std::vector<struct epoll_event>& events, int timeout_ms = -1) {
-        events.resize(max_events_);
-        int num_events = epoll_wait(epoll_fd_, events.data(), max_events_, timeout_ms);
-        if (num_events > 0) {
-            events.resize(num_events);
-        } else {
-            events.clear();
+        EpollWaitOptions options;
+        options.timeout_ms = timeout_ms;
+        const auto result = wait_with_options(events, options);
+        if (result.status == EpollWaitStatus::SysError) {
+            errno = result.error;
+            return -1;
         }
-        return num_events;
+        return result.count;
+    }
+
+    EpollWaitResult wait_with_options(
+        std::vector<struct epoll_event>& events,
+        const EpollWaitOptions& options
+    ) {
+        events.resize(max_events_);
+        if (options.cancel_flag != nullptr && options.cancel_flag->load(std::memory_order_acquire)) {
+            events.clear();
+            return {0, 0, EpollWaitStatus::Cancelled};
+        }
+
+        auto remaining_ms = options.timeout_ms;
+        while (true) {
+            int wait_ms = options.timeout_ms;
+            if (options.timeout_ms < 0) {
+                wait_ms = (options.poll_interval_ms > 0) ? options.poll_interval_ms : 1;
+            } else if (options.timeout_ms > 0) {
+                if (remaining_ms <= 0) {
+                    events.clear();
+                    return {0, 0, EpollWaitStatus::Timeout};
+                }
+                const int interval = (options.poll_interval_ms > 0) ? options.poll_interval_ms : 1;
+                wait_ms = std::min(interval, remaining_ms);
+                remaining_ms -= wait_ms;
+            }
+
+            const int num_events = epoll_wait(epoll_fd_, events.data(), max_events_, wait_ms);
+            if (num_events > 0) {
+                events.resize(num_events);
+                return {num_events, 0, EpollWaitStatus::Ok};
+            }
+            if (num_events == 0) {
+                if (options.cancel_flag != nullptr && options.cancel_flag->load(std::memory_order_acquire)) {
+                    events.clear();
+                    return {0, 0, EpollWaitStatus::Cancelled};
+                }
+                if (options.timeout_ms == 0) {
+                    events.clear();
+                    return {0, 0, EpollWaitStatus::Timeout};
+                }
+                if (options.timeout_ms > 0 && remaining_ms <= 0) {
+                    events.clear();
+                    return {0, 0, EpollWaitStatus::Timeout};
+                }
+                // bounded or infinite mode with budget remaining: keep polling
+                continue;
+            }
+
+            if (errno == EINTR) {
+                if (options.cancel_flag != nullptr && options.cancel_flag->load(std::memory_order_acquire)) {
+                    events.clear();
+                    return {0, 0, EpollWaitStatus::Cancelled};
+                }
+                continue;
+            }
+
+            const int err = errno;
+            events.clear();
+            return {-1, err, EpollWaitStatus::SysError};
+        }
     }
     
     // 等待事件（非阻塞）

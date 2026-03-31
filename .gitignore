@@ -47,3 +47,7 @@ Makefile
 .clang-format.cache
 .clang-format
 .editorconfig
+
+# Benchmark/Test generated reports
+benchmarks/reports/
+tests/netns/reports/

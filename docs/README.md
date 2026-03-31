@@ -22,12 +22,14 @@
   - 在“真实一点的应用”里，走完整条路径：数据结构 → I/O → 协议 → 应用 → 性能
   - 不只是看书/画图，而是可以编译、跑起来、测延迟和吞吐。
 
-更细的功能拆分见 `docs/FEATURES.md`，完整设计说明见 `docs/PROJECT_DOCUMENTATION.md`，后续计划见 `TODO_ROADMAP.md`。
+更细的功能拆分见 `docs/FEATURES.md`，完整设计说明见 `docs/PROJECT_DOCUMENTATION.md`，后续计划见 `TODO_ROADMAP.md`，路线验收标准见 `docs/ROADMAP_ACCEPTANCE.md`。
 
 另外，两个仿真总控 app 的行为说明见：
 
 - `docs/RUN_SIM_MARKET.md`
 - `docs/RUN_SIM_ORDER.md`
+- `docs/BENCHMARK_SUITE.md`
+- `docs/NETNS_TESTING.md`
 
 ---
 

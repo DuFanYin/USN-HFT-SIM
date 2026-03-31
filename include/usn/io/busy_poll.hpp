@@ -12,6 +12,7 @@
 #include <usn/core/packet_ring.hpp>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <thread>
 #include <functional>
 
@@ -23,6 +24,25 @@ struct BusyPollConfig {
     std::chrono::nanoseconds max_idle_time{10000};  // 最大空闲时间
     unsigned max_iterations{1000};                 // 最大迭代次数
     bool adaptive{true};                           // 自适应模式
+};
+
+enum class BusyPollStatus {
+    Completed,
+    Timeout,
+    Cancelled,
+    Stopped
+};
+
+struct BusyPollControl {
+    // <0: no timeout, >=0 timeout budget
+    std::chrono::milliseconds timeout{std::chrono::milliseconds(-1)};
+    const std::atomic<bool>* cancel_flag{nullptr};
+};
+
+struct BusyPollResult {
+    std::uint64_t iterations{0};
+    std::uint64_t data_hits{0};
+    BusyPollStatus status{BusyPollStatus::Completed};
 };
 
 // Busy Polling 类
@@ -39,15 +59,43 @@ public:
         std::function<bool()> poll_func,
         std::function<void()> on_idle = nullptr
     ) {
+        BusyPollControl control{};
+        start_with_control(poll_func, on_idle, control);
+    }
+
+    BusyPollResult start_with_control(
+        std::function<bool()> poll_func,
+        std::function<void()> on_idle,
+        const BusyPollControl& control
+    ) {
         running_.store(true);
         
         auto start_time = std::chrono::steady_clock::now();
         unsigned iterations = 0;
+        BusyPollResult result{};
         
         while (running_.load(std::memory_order_acquire)) {
+            if (control.cancel_flag != nullptr && control.cancel_flag->load(std::memory_order_acquire)) {
+                result.status = BusyPollStatus::Cancelled;
+                running_.store(false, std::memory_order_release);
+                break;
+            }
+            if (control.timeout.count() >= 0) {
+                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start_time
+                );
+                if (elapsed_ms >= control.timeout) {
+                    result.status = BusyPollStatus::Timeout;
+                    running_.store(false, std::memory_order_release);
+                    break;
+                }
+            }
+
+            result.iterations++;
             bool has_data = poll_func();
             
             if (has_data) {
+                result.data_hits++;
                 idle_count_.store(0, std::memory_order_relaxed);
                 iterations = 0;
             } else {
@@ -81,6 +129,11 @@ public:
                 }
             }
         }
+
+        if (result.status == BusyPollStatus::Completed && !running_.load(std::memory_order_acquire)) {
+            result.status = BusyPollStatus::Stopped;
+        }
+        return result;
     }
     
     // 停止忙轮询

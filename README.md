@@ -22,7 +22,7 @@ In other words, this repository is both a small user-space networking stack and 
   - Walk the full path inside a “real-ish” application: data structures → I/O → protocol → application → performance.
   - Not just reading books or drawing diagrams, but compiling, running, and measuring latency / throughput.
 
-For a more detailed feature breakdown, see `docs/FEATURES.md`. For a full design write-up, see `docs/PROJECT_DOCUMENTATION.md`. The roadmap for future work is in `TODO_ROADMAP.md`.
+For a more detailed feature breakdown, see `docs/FEATURES.md`. For a full design write-up, see `docs/PROJECT_DOCUMENTATION.md`. The roadmap for future work is in `TODO_ROADMAP.md`, and acceptance criteria are in `docs/ROADMAP_ACCEPTANCE.md`. The unified benchmark suite usage is in `docs/BENCHMARK_SUITE.md`, and netns integration testing is in `docs/NETNS_TESTING.md` (runner path: `tests/run_netns_suite.py`).
 
 ---
 

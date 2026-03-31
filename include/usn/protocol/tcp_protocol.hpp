@@ -3,10 +3,9 @@
 // TCP 协议栈实现（简化版）
 //
 // 设计目标：
-// - TCP 状态机
-// - 序列号管理
-// - 基本连接管理
-// - 简化的拥塞控制
+// - TCP 帧创建与解析
+// - 校验和计算与验证
+// - 基本类型定义（TcpState, TcpHeader, TcpConnection）
 
 #pragma once
 
@@ -15,7 +14,8 @@
 #include <netinet/in.h>
 #include <cstdint>
 #include <cstring>
-#include <functional>
+#include <cstddef>
+#include <vector>
 
 namespace usn {
 
@@ -56,7 +56,7 @@ struct __attribute__((packed)) TcpHeader {
     uint16_t window;
     uint16_t checksum;
     uint16_t urgent_ptr;
-    
+
     void to_network_order() {
         source_port = htons(source_port);
         dest_port = htons(dest_port);
@@ -66,7 +66,7 @@ struct __attribute__((packed)) TcpHeader {
         checksum = htons(checksum);
         urgent_ptr = htons(urgent_ptr);
     }
-    
+
     void to_host_order() {
         source_port = ntohs(source_port);
         dest_port = ntohs(dest_port);
@@ -76,7 +76,7 @@ struct __attribute__((packed)) TcpHeader {
         checksum = ntohs(checksum);
         urgent_ptr = ntohs(urgent_ptr);
     }
-    
+
     bool has_syn() const { return (flags & (1 << 1)) != 0; }  // bit 1
     bool has_ack() const { return (flags & (1 << 4)) != 0; }  // bit 4
     bool has_fin() const { return (flags & (1 << 0)) != 0; }  // bit 0
@@ -91,15 +91,17 @@ struct TcpConnection {
     uint32_t remote_ip;
     uint16_t local_port;
     uint16_t remote_port;
-    
+
     uint32_t send_seq;      // 发送序列号
     uint32_t recv_seq;      // 接收序列号
     uint32_t send_ack;      // 发送确认号
     uint32_t recv_ack;      // 接收确认号
-    
+
     TcpState state;
     uint16_t window_size;
-    
+    uint32_t recv_window;    // 本端可接收窗口（rwnd）
+    uint32_t peer_window;    // 对端通告窗口
+
     TcpConnection()
         : local_ip(0)
         , remote_ip(0)
@@ -110,16 +112,17 @@ struct TcpConnection {
         , send_ack(0)
         , recv_ack(0)
         , state(TcpState::CLOSED)
-        , window_size(65535) {}
+        , window_size(65535)
+        , recv_window(65535)
+        , peer_window(65535) {}
 };
 
-// TCP 协议处理类（简化版）
+// TCP 协议处理类（帧创建/解析/校验和）
 class TcpProtocol {
 public:
     static constexpr std::size_t kHeaderLen = 20;
 
     // 创建 SYN 数据包（三次握手 - 第一步）
-    // 调用方必须提供足够大的 out_buffer（>= kHeaderLen）
     static Packet create_syn(
         uint16_t src_port,
         uint16_t dst_port,
@@ -135,28 +138,26 @@ public:
         header.dest_port = dst_port;
         header.seq_num = seq_num;
         header.ack_num = 0;
-        header.data_offset = 5;  // 20 bytes / 4
-        header.flags = (1 << 1);  // SYN (bit 1)
+        header.data_offset = 5;
+        header.flags = (1 << 1);  // SYN
         header.window = 65535;
         header.checksum = 0;
         header.urgent_ptr = 0;
 
         uint8_t* buffer = out_buffer;
         header.to_network_order();
-        
-        // 手动写入 header（正确处理 data_offset 和 flags）
+
         std::memcpy(buffer, &header, 12);
         buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);
         buffer[13] = header.flags & 0xFF;
         std::memcpy(buffer + 14, reinterpret_cast<uint8_t*>(&header) + 14, 6);
-        
-        // 计算校验和
+
         uint16_t checksum = calculate_checksum(buffer, kHeaderLen, src_ip, dst_ip);
         *reinterpret_cast<uint16_t*>(buffer + 16) = htons(checksum);
-        
+
         return Packet(buffer, kHeaderLen);
     }
-    
+
     // 创建 SYN-ACK 数据包（三次握手 - 第二步）
     static Packet create_syn_ack(
         const TcpConnection& conn,
@@ -183,18 +184,15 @@ public:
         buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);
         buffer[13] = header.flags & 0xFF;
         std::memcpy(buffer + 14, reinterpret_cast<uint8_t*>(&header) + 14, 6);
-        
+
         header.checksum = calculate_checksum(
-            buffer,
-            kHeaderLen,
-            conn.local_ip,
-            conn.remote_ip
+            buffer, kHeaderLen, conn.local_ip, conn.remote_ip
         );
         *reinterpret_cast<uint16_t*>(buffer + 16) = htons(header.checksum);
-        
+
         return Packet(buffer, kHeaderLen);
     }
-    
+
     // 创建 ACK 数据包
     static Packet create_ack(
         const TcpConnection& conn,
@@ -220,20 +218,16 @@ public:
         buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);
         buffer[13] = header.flags & 0xFF;
         std::memcpy(buffer + 14, reinterpret_cast<uint8_t*>(&header) + 14, 6);
-        
+
         header.checksum = calculate_checksum(
-            buffer,
-            kHeaderLen,
-            conn.local_ip,
-            conn.remote_ip
+            buffer, kHeaderLen, conn.local_ip, conn.remote_ip
         );
         *reinterpret_cast<uint16_t*>(buffer + 16) = htons(header.checksum);
-        
+
         return Packet(buffer, kHeaderLen);
     }
-    
+
     // 创建数据包（带 payload）
-    // 调用方必须提供足够大的 out_buffer（>= kHeaderLen + len）
     static Packet create_data(
         const TcpConnection& conn,
         const uint8_t* data,
@@ -242,10 +236,10 @@ public:
     ) {
         std::size_t total_len = kHeaderLen + len;
         uint8_t* buffer = out_buffer;
-        
+
         TcpHeader header;
         std::memset(&header, 0, sizeof(header));
-        
+
         header.source_port = conn.local_port;
         header.dest_port = conn.remote_port;
         header.seq_num = conn.send_seq;
@@ -255,30 +249,24 @@ public:
         header.window = conn.window_size;
         header.checksum = 0;
         header.urgent_ptr = 0;
-        
+
         header.to_network_order();
-        
-        // 手动写入 header（正确处理 data_offset 和 flags）
+
         std::memcpy(buffer, &header, 12);
         buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);
         buffer[13] = header.flags & 0xFF;
         std::memcpy(buffer + 14, reinterpret_cast<uint8_t*>(&header) + 14, 6);
-        
-        // 拷贝数据
+
         std::memcpy(buffer + kHeaderLen, data, len);
-        
-        // 计算校验和
+
         uint16_t checksum = calculate_checksum(
-            buffer,
-            total_len,
-            conn.local_ip,
-            conn.remote_ip
+            buffer, total_len, conn.local_ip, conn.remote_ip
         );
         *reinterpret_cast<uint16_t*>(buffer + 16) = htons(checksum);
-        
+
         return Packet(buffer, total_len);
     }
-    
+
     // 创建 FIN 数据包
     static Packet create_fin(
         const TcpConnection& conn,
@@ -303,18 +291,15 @@ public:
         buffer[12] = (header.data_offset << 4) | ((header.flags >> 8) & 0xF);
         buffer[13] = header.flags & 0xFF;
         std::memcpy(buffer + 14, reinterpret_cast<uint8_t*>(&header) + 14, 6);
-        
+
         header.checksum = calculate_checksum(
-            buffer,
-            kHeaderLen,
-            conn.local_ip,
-            conn.remote_ip
+            buffer, kHeaderLen, conn.local_ip, conn.remote_ip
         );
         *reinterpret_cast<uint16_t*>(buffer + 16) = htons(header.checksum);
-        
+
         return Packet(buffer, kHeaderLen);
     }
-    
+
     // 解析 TCP 数据包
     static bool parse(
         const Packet& packet,
@@ -322,36 +307,68 @@ public:
         const uint8_t*& payload,
         std::size_t& payload_len
     ) {
-        if (packet.len < kHeaderLen) {  // 最小 TCP header 长度
+        if (packet.len < kHeaderLen) {
             return false;
         }
-        
+
         std::memset(&header, 0, sizeof(header));
         std::memcpy(&header, packet.data, 12);
         std::memcpy(reinterpret_cast<uint8_t*>(&header) + 14, packet.data + 14, 6);
-        
-        // 提取 data_offset（前 4 位）
+
         uint8_t data_offset_byte = reinterpret_cast<const uint8_t*>(packet.data)[12];
         header.data_offset = (data_offset_byte >> 4) & 0xF;
-        
-        // 提取 flags（后 8 位在 data_offset_byte 的低 4 位，以及下一个字节）
+
         header.flags = (data_offset_byte & 0xF) << 8;
         header.flags |= reinterpret_cast<const uint8_t*>(packet.data)[13];
-        
+
         header.to_host_order();
-        
-        // 计算实际头部长度
+
         std::size_t header_len = header.data_offset * 4;
         if (header_len < kHeaderLen || header_len > packet.len) {
             return false;
         }
-        
+
         payload = packet.data + header_len;
         payload_len = packet.len - header_len;
-        
+
         return true;
     }
-    
+
+    static bool validate_checksum(
+        const Packet& packet,
+        uint32_t src_ip,
+        uint32_t dst_ip
+    ) {
+        if (packet.data == nullptr || packet.len < kHeaderLen) {
+            return false;
+        }
+        std::vector<uint8_t> tmp(packet.data, packet.data + packet.len);
+        uint16_t stored_net = 0;
+        std::memcpy(&stored_net, tmp.data() + 16, sizeof(stored_net));
+        const uint16_t stored = ntohs(stored_net);
+        tmp[16] = 0;
+        tmp[17] = 0;
+        const uint16_t calc = calculate_checksum(tmp.data(), tmp.size(), src_ip, dst_ip);
+        return stored == calc;
+    }
+
+    static bool parse_and_validate(
+        const Packet& packet,
+        uint32_t src_ip,
+        uint32_t dst_ip,
+        TcpHeader& header,
+        const uint8_t*& payload,
+        std::size_t& payload_len
+    ) {
+        if (!parse(packet, header, payload, payload_len)) {
+            return false;
+        }
+        if (is_malformed_header(header)) {
+            return false;
+        }
+        return validate_checksum(packet, src_ip, dst_ip);
+    }
+
     // 计算 TCP 校验和（假设 src_ip / dst_ip 为网络字节序）
     static uint16_t calculate_checksum(
         const uint8_t* data,
@@ -360,43 +377,51 @@ public:
         uint32_t dst_ip
     ) {
         uint32_t sum = 0;
-        
-        // 伪头部：src_ip, dst_ip, zero(8) + protocol(8), tcp_length(16)
+
         uint16_t word;
-        
+
         word = static_cast<uint16_t>(src_ip >> 16);
         sum += ntohs(word);
         word = static_cast<uint16_t>(src_ip & 0xFFFFu);
         sum += ntohs(word);
-        
+
         word = static_cast<uint16_t>(dst_ip >> 16);
         sum += ntohs(word);
         word = static_cast<uint16_t>(dst_ip & 0xFFFFu);
         sum += ntohs(word);
-        
-        // zero (0) + protocol (6)
+
         word = 0x0006u;
         sum += ntohs(word);
-        
+
         uint16_t tcp_len = htons(static_cast<uint16_t>(len));
         sum += ntohs(tcp_len);
-        
+
         const uint16_t* data_words = reinterpret_cast<const uint16_t*>(data);
         std::size_t word_count = len / 2;
         for (std::size_t i = 0; i < word_count; ++i) {
             sum += ntohs(data_words[i]);
         }
-        
+
         if (len % 2 != 0) {
             uint16_t last = static_cast<uint16_t>(data[len - 1]) << 8;
             sum += ntohs(last);
         }
-        
+
         while (sum >> 16) {
             sum = (sum & 0xFFFF) + (sum >> 16);
         }
-        
+
         return static_cast<uint16_t>(~sum);
+    }
+
+    static bool is_malformed_header(const TcpHeader& header) {
+        if (header.data_offset < 5) {
+            return true;
+        }
+        if (header.has_syn() && header.has_fin()) {
+            return true;
+        }
+        return false;
     }
 };
 

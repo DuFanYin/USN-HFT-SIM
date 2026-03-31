@@ -12,6 +12,7 @@
 #include <usn/protocol/udp_protocol.hpp>
 #include <usn/core/packet_ring.hpp>
 #include <usn/io/batch_io.hpp>
+#include <usn/io/io_status.hpp>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -150,21 +151,44 @@ public:
     // 批量接收到 ring buffer
     BatchIOResult recv_batch(PacketRing& ring, std::size_t max_packets) {
         if (fd_ < 0) {
-            return {0, EBADF};
+            return {0, EBADF, BatchIOStatus::SysError};
         }
         
         BatchRecv recv(fd_);
         return recv.recv_batch(ring, max_packets);
     }
+
+    UnifiedIOResult recv_batch_unified(
+        PacketRing& ring,
+        std::size_t max_packets,
+        const BatchIOOptions& options = BatchIOOptions{}
+    ) {
+        if (fd_ < 0) {
+            return {0, EBADF, UnifiedIOStatus::SysError};
+        }
+        BatchRecv recv(fd_);
+        return to_unified_result(recv.recv_batch(ring, max_packets, options));
+    }
     
     // 批量发送
     BatchIOResult send_batch(std::span<const Packet> packets) {
         if (fd_ < 0) {
-            return {0, EBADF};
+            return {0, EBADF, BatchIOStatus::SysError};
         }
         
         BatchSend send(fd_);
         return send.send_batch(packets);
+    }
+
+    UnifiedIOResult send_batch_unified(
+        std::span<const Packet> packets,
+        const BatchIOOptions& options = BatchIOOptions{}
+    ) {
+        if (fd_ < 0) {
+            return {0, EBADF, UnifiedIOStatus::SysError};
+        }
+        BatchSend send(fd_);
+        return to_unified_result(send.send_batch(packets, options));
     }
     
     // 关闭 socket
