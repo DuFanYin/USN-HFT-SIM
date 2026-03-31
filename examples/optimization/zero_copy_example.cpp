@@ -113,9 +113,8 @@ int main() {
     std::cout << "  ✓ Popped " << packets_popped << " packets from ring\n";
     std::cout << "\n";
     
-    // 6. CPU 亲和性（如果支持）
+    // 6. CPU 亲和性
     std::cout << "[6] CPU Affinity\n";
-#ifdef __linux__
     int current_cpu = CpuAffinity::get_current_cpu();
     if (current_cpu >= 0) {
         std::cout << "  Current CPU: " << current_cpu << "\n";
@@ -124,9 +123,6 @@ int main() {
         std::cout << "  Bind to CPU " << current_cpu << ": "
                   << (bound ? "success" : "failed") << "\n";
     }
-#else
-    std::cout << "  ⚠ CPU affinity not supported on this platform\n";
-#endif
     std::cout << "\n";
     
     // 7. 清理

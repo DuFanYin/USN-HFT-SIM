@@ -4,7 +4,7 @@
 // - 连接到本地订单网关
 // - 周期性发送简单的 OrderRequest
 
-#include <usn/apps/common/messages.hpp>
+#include "../common/messages.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>

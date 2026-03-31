@@ -38,7 +38,6 @@ void test_numa_topology() {
 void test_cpu_affinity() {
     std::cout << "[TEST] CPU Affinity\n";
     
-#ifdef __linux__
     int current_cpu = CpuAffinity::get_current_cpu();
     std::cout << "  Current CPU: " << current_cpu << "\n";
     
@@ -54,9 +53,6 @@ void test_cpu_affinity() {
                   << (thread_bound ? "success" : "failed") << "\n";
     });
     t.join();
-#else
-    std::cout << "  ⚠ CPU affinity not supported on this platform\n";
-#endif
     
     std::cout << "  ✓ CPU Affinity test passed\n";
 }

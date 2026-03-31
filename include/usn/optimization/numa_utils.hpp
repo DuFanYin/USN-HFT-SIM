@@ -16,13 +16,10 @@
 #include <cstdlib>
 #include <vector>
 #include <thread>
-
-#ifdef __linux__
 #include <numa.h>
 #include <numaif.h>
 #include <pthread.h>
 #include <sched.h>
-#endif
 
 namespace usn {
 
@@ -44,7 +41,6 @@ public:
     
     // 检测 NUMA 拓扑
     bool detect() {
-#ifdef __linux__
         if (numa_available() < 0) {
             numa_available_ = false;
             return false;
@@ -80,13 +76,6 @@ public:
         }
         
         return true;
-#else
-        // 非 Linux 系统：假设单节点
-        numa_available_ = false;
-        num_nodes_ = 1;
-        max_node_ = 0;
-        return false;
-#endif
     }
     
     // 检查 NUMA 是否可用
@@ -106,43 +95,29 @@ public:
     
     // 获取当前线程所在的 NUMA 节点
     int get_current_node() const {
-#ifdef __linux__
         if (!numa_available_) {
             return 0;
         }
         return numa_node_of_cpu(sched_getcpu());
-#else
-        return 0;
-#endif
     }
     
     // 在指定节点分配内存
     void* allocate_on_node(std::size_t size, int node) {
-#ifdef __linux__
         if (!numa_available_) {
             (void)node;  // 未使用参数
             return ::malloc(size);
         }
         return numa_alloc_onnode(size, node);
-#else
-        (void)node;  // 未使用参数
-        return ::malloc(size);
-#endif
     }
     
     // 释放 NUMA 分配的内存
     void free_on_node(void* ptr, std::size_t size) {
-#ifdef __linux__
         if (!numa_available_) {
             (void)size;  // 未使用参数
             ::free(ptr);
             return;
         }
         numa_free(ptr, size);
-#else
-        (void)size;  // 未使用参数
-        ::free(ptr);
-#endif
     }
 
 private:
@@ -161,7 +136,6 @@ class CpuAffinity {
 public:
     // 将当前线程绑定到指定的 CPU core
     static bool bind_to_cpu(int cpu_id) {
-#ifdef __linux__
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(cpu_id, &cpuset);
@@ -171,16 +145,10 @@ public:
             sizeof(cpu_set_t),
             &cpuset
         ) == 0;
-#else
-        // macOS 不支持，返回 false
-        (void)cpu_id;
-        return false;
-#endif
     }
     
     // 将线程绑定到指定的 CPU core
     static bool bind_thread_to_cpu(std::thread& thread, int cpu_id) {
-#ifdef __linux__
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         CPU_SET(cpu_id, &cpuset);
@@ -190,11 +158,6 @@ public:
             sizeof(cpu_set_t),
             &cpuset
         ) == 0;
-#else
-        (void)thread;
-        (void)cpu_id;
-        return false;
-#endif
     }
     
     // 将线程绑定到 NUMA 节点的第一个 CPU
@@ -214,16 +177,11 @@ public:
     
     // 获取当前 CPU core ID
     static int get_current_cpu() {
-#ifdef __linux__
         return sched_getcpu();
-#else
-        return -1;
-#endif
     }
     
     // 设置 CPU 亲和性掩码（绑定到多个 CPU）
     static bool set_affinity_mask(const std::vector<int>& cpu_ids) {
-#ifdef __linux__
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         
@@ -236,10 +194,6 @@ public:
             sizeof(cpu_set_t),
             &cpuset
         ) == 0;
-#else
-        (void)cpu_ids;
-        return false;
-#endif
     }
 };
 

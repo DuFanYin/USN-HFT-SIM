@@ -14,20 +14,18 @@
 #include <cstdint>
 #include <vector>
 #include <functional>
-
-#ifdef __linux__
 #include <sys/epoll.h>
 
 namespace usn {
 
-// Epoll 事件类型
-enum class EpollEventType {
-    READ = EPOLLIN,
-    WRITE = EPOLLOUT,
-    ERROR = EPOLLERR,
-    HANGUP = EPOLLHUP,
-    EDGE_TRIGGER = EPOLLET,
-    ONESHOT = EPOLLONESHOT
+// Epoll 事件类型（显式指定底层类型，避免与系统宏不兼容）
+enum class EpollEventType : std::uint32_t {
+    READ         = static_cast<std::uint32_t>(EPOLLIN),
+    WRITE        = static_cast<std::uint32_t>(EPOLLOUT),
+    ERROR        = static_cast<std::uint32_t>(EPOLLERR),
+    HANGUP       = static_cast<std::uint32_t>(EPOLLHUP),
+    EDGE_TRIGGER = static_cast<std::uint32_t>(EPOLLET),
+    ONESHOT      = static_cast<std::uint32_t>(EPOLLONESHOT)
 };
 
 // Epoll 事件回调函数类型
@@ -127,20 +125,3 @@ private:
 };
 
 }  // namespace usn
-
-#else
-// 非 Linux 系统：提供空实现
-namespace usn {
-class EpollWrapper {
-public:
-    explicit EpollWrapper(int = 64) {}
-    bool add(int, uint32_t, void* = nullptr) { return false; }
-    bool modify(int, uint32_t, void* = nullptr) { return false; }
-    bool remove(int) { return false; }
-    int wait(std::vector<struct epoll_event>&, int = -1) { return 0; }
-    int wait_nonblock(std::vector<struct epoll_event>&) { return 0; }
-    int fd() const noexcept { return -1; }
-    void event_loop(std::function<void(int, uint32_t)>, int = -1) {}
-};
-}
-#endif

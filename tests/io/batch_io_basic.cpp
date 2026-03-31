@@ -11,19 +11,15 @@
 #include <fcntl.h>
 #include <iostream>
 #include <unistd.h>
-
-#ifdef __linux__
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#endif
 
 using namespace usn;
 
 void test_batch_recv_interface() {
     std::cout << "[TEST] BatchRecv interface\n";
     
-#ifdef __linux__
     // 创建 UDP socket
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
@@ -45,15 +41,11 @@ void test_batch_recv_interface() {
     
     close(sock);
     std::cout << "  ✓ BatchRecv interface test passed\n";
-#else
-    std::cout << "  ⚠ Skipped (Linux only)\n";
-#endif
 }
 
 void test_batch_send_interface() {
     std::cout << "[TEST] BatchSend interface\n";
     
-#ifdef __linux__
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         std::cout << "  ⚠ Skipped (cannot create socket)\n";
@@ -72,14 +64,10 @@ void test_batch_send_interface() {
     };
     
     // 尝试发送（可能会失败，因为没有绑定地址，但接口应该工作）
-    auto result = send.send_batch(packets);
-    // 不检查结果，因为可能失败（没有绑定地址）
+    send.send_batch(packets);
     
     close(sock);
     std::cout << "  ✓ BatchSend interface test passed\n";
-#else
-    std::cout << "  ⚠ Skipped (Linux only)\n";
-#endif
 }
 
 int main() {

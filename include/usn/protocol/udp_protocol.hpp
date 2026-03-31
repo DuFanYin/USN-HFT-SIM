@@ -48,40 +48,38 @@ static_assert(sizeof(UdpHeader) == 8, "UDP header must be 8 bytes");
 class UdpProtocol {
 public:
     // 计算 UDP 校验和（伪头部 + UDP 头部 + 数据）
+    // 注意：这里假设 src_ip / dst_ip 已经是网络字节序（例如来自 in_addr.s_addr）
     static uint16_t calculate_checksum(
         const uint8_t* data,
         std::size_t len,
         uint32_t src_ip,
-        uint32_t dst_ip,
-        uint16_t src_port,
-        uint16_t dst_port
+        uint32_t dst_ip
     ) {
-        // 伪头部
-        struct PseudoHeader {
-            uint32_t src_ip;
-            uint32_t dst_ip;
-            uint8_t zero;
-            uint8_t protocol;  // UDP = 17
-            uint16_t length;
-        } __attribute__((packed));
-        
-        PseudoHeader pseudo;
-        pseudo.src_ip = src_ip;
-        pseudo.dst_ip = dst_ip;
-        pseudo.zero = 0;
-        pseudo.protocol = 17;  // UDP
-        pseudo.length = htons(static_cast<uint16_t>(len));
-        
         // 计算校验和
         uint32_t sum = 0;
         
-        // 伪头部
-        const uint16_t* p = reinterpret_cast<const uint16_t*>(&pseudo);
-        for (std::size_t i = 0; i < sizeof(PseudoHeader) / 2; ++i) {
-            sum += ntohs(p[i]);
-        }
+        // 伪头部：src_ip, dst_ip, zero(8) + protocol(8), udp_length(16)
+        uint16_t word;
         
-        // UDP 数据（如果长度为奇数，补零）
+        word = static_cast<uint16_t>(src_ip >> 16);
+        sum += ntohs(word);
+        word = static_cast<uint16_t>(src_ip & 0xFFFFu);
+        sum += ntohs(word);
+        
+        word = static_cast<uint16_t>(dst_ip >> 16);
+        sum += ntohs(word);
+        word = static_cast<uint16_t>(dst_ip & 0xFFFFu);
+        sum += ntohs(word);
+        
+        // zero (0) + protocol (17)
+        word = 0x0011u;  // high byte zero, low byte = 17
+        sum += ntohs(word);
+        
+        // UDP 长度字段
+        uint16_t udp_len = htons(static_cast<uint16_t>(len));
+        sum += ntohs(udp_len);
+        
+        // UDP 头部 + 数据（如果长度为奇数，补零）
         const uint16_t* data_words = reinterpret_cast<const uint16_t*>(data);
         std::size_t word_count = len / 2;
         for (std::size_t i = 0; i < word_count; ++i) {
@@ -139,9 +137,7 @@ public:
                 buffer,
                 total_len,
                 src_ip,
-                dst_ip,
-                src_port,
-                dst_port
+                dst_ip
             );
             // 更新校验和（网络字节序）
             *reinterpret_cast<uint16_t*>(buffer + offsetof(UdpHeader, checksum)) = htons(checksum);
@@ -192,18 +188,12 @@ public:
         std::memcpy(&header, packet.data, sizeof(UdpHeader));
         header.to_host_order();
         
-        // 提取端口
-        uint16_t src_port = header.source_port;
-        uint16_t dst_port = header.dest_port;
-        
         // 计算校验和
         uint16_t calculated = calculate_checksum(
             packet.data,
             packet.len,
             src_ip,
-            dst_ip,
-            src_port,
-            dst_port
+            dst_ip
         );
         
         // 校验和应该为 0（如果正确）

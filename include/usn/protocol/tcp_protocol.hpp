@@ -336,34 +336,34 @@ public:
         return true;
     }
     
-    // 计算 TCP 校验和
+    // 计算 TCP 校验和（假设 src_ip / dst_ip 为网络字节序）
     static uint16_t calculate_checksum(
         const uint8_t* data,
         std::size_t len,
         uint32_t src_ip,
         uint32_t dst_ip
     ) {
-        struct PseudoHeader {
-            uint32_t src_ip;
-            uint32_t dst_ip;
-            uint8_t zero;
-            uint8_t protocol;  // TCP = 6
-            uint16_t length;
-        } __attribute__((packed));
-        
-        PseudoHeader pseudo;
-        pseudo.src_ip = src_ip;
-        pseudo.dst_ip = dst_ip;
-        pseudo.zero = 0;
-        pseudo.protocol = 6;  // TCP
-        pseudo.length = htons(static_cast<uint16_t>(len));
-        
         uint32_t sum = 0;
         
-        const uint16_t* p = reinterpret_cast<const uint16_t*>(&pseudo);
-        for (std::size_t i = 0; i < sizeof(PseudoHeader) / 2; ++i) {
-            sum += ntohs(p[i]);
-        }
+        // 伪头部：src_ip, dst_ip, zero(8) + protocol(8), tcp_length(16)
+        uint16_t word;
+        
+        word = static_cast<uint16_t>(src_ip >> 16);
+        sum += ntohs(word);
+        word = static_cast<uint16_t>(src_ip & 0xFFFFu);
+        sum += ntohs(word);
+        
+        word = static_cast<uint16_t>(dst_ip >> 16);
+        sum += ntohs(word);
+        word = static_cast<uint16_t>(dst_ip & 0xFFFFu);
+        sum += ntohs(word);
+        
+        // zero (0) + protocol (6)
+        word = 0x0006u;
+        sum += ntohs(word);
+        
+        uint16_t tcp_len = htons(static_cast<uint16_t>(len));
+        sum += ntohs(tcp_len);
         
         const uint16_t* data_words = reinterpret_cast<const uint16_t*>(data);
         std::size_t word_count = len / 2;

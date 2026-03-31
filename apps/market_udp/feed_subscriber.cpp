@@ -4,7 +4,7 @@
 // - 加入组播组
 // - 接收 MarketDataIncrement，做简单的 seq 连续性统计
 
-#include <usn/apps/common/messages.hpp>
+#include "../common/messages.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>

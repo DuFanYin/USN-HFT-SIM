@@ -6,8 +6,7 @@
 #include <iostream>
 #include <unistd.h>
 #include <sys/socket.h>
-
-#ifdef __linux__
+#include <cassert>
 
 using namespace usn;
 
@@ -55,10 +54,3 @@ int main() {
         return 1;
     }
 }
-
-#else
-int main() {
-    std::cout << "Epoll tests skipped (Linux only)\n";
-    return 0;
-}
-#endif

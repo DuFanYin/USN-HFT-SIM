@@ -9,7 +9,6 @@
 
 #pragma once
 
-#ifdef __linux__
 #include <liburing.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -169,19 +168,3 @@ private:
 };
 
 }  // namespace usn
-
-#else
-// 非 Linux 系统：提供空实现
-namespace usn {
-class IoUringWrapper {
-public:
-    explicit IoUringWrapper(unsigned = 256) {}
-    bool is_initialized() const noexcept { return false; }
-    bool submit_recv(int, void*, size_t, unsigned = 0) { return false; }
-    bool submit_send(int, const void*, size_t, unsigned = 0) { return false; }
-    int wait_completions(std::vector<void*>&, unsigned = 1, unsigned = 64) { return 0; }
-    int peek_completions(std::vector<void*>&, unsigned = 64) { return 0; }
-    void* ring() noexcept { return nullptr; }
-};
-}
-#endif

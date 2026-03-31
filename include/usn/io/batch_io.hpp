@@ -16,15 +16,11 @@
 #include <usn/core/packet_ring.hpp>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <linux/socket.h>
 #include <cerrno>
 #include <cstddef>
 #include <span>
 #include <vector>
-
-#ifdef __linux__
-#include <linux/socket.h>
-#include <sys/socket.h>
-#endif
 
 namespace usn {
 
@@ -69,21 +65,21 @@ public:
             temp_iovecs_[i].iov_base = temp_buffers_[i].data();
             temp_iovecs_[i].iov_len = temp_buffers_[i].size();
             
-            temp_msghdrs_[i].msg_iov = &temp_iovecs_[i];
-            temp_msghdrs_[i].msg_iovlen = 1;
-            temp_msghdrs_[i].msg_name = nullptr;
-            temp_msghdrs_[i].msg_namelen = 0;
-            temp_msghdrs_[i].msg_control = nullptr;
-            temp_msghdrs_[i].msg_controllen = 0;
-            temp_msghdrs_[i].msg_flags = 0;
+            temp_msghdrs_[i].msg_hdr.msg_iov = &temp_iovecs_[i];
+            temp_msghdrs_[i].msg_hdr.msg_iovlen = 1;
+            temp_msghdrs_[i].msg_hdr.msg_name = nullptr;
+            temp_msghdrs_[i].msg_hdr.msg_namelen = 0;
+            temp_msghdrs_[i].msg_hdr.msg_control = nullptr;
+            temp_msghdrs_[i].msg_hdr.msg_controllen = 0;
+            temp_msghdrs_[i].msg_hdr.msg_flags = 0;
         }
         
-#ifdef __linux__
-        // 使用 recvmmsg（Linux 特有）
+        // 使用 recvmmsg（Linux）
+        const unsigned int msg_count = static_cast<unsigned int>(max_packets);
         int received = recvmmsg(
             socket_fd_,
             temp_msghdrs_.data(),
-            max_packets,
+            msg_count,
             MSG_DONTWAIT,  // 非阻塞
             nullptr
         );
@@ -113,29 +109,6 @@ public:
         }
         
         return {added, 0};
-#else
-        // 非 Linux 系统：fallback 到单个 recvmsg
-        // 注意：这不是真正的批量操作，但保持接口一致性
-        std::size_t received = 0;
-        for (std::size_t i = 0; i < max_packets; ++i) {
-            ssize_t len = recvmsg(socket_fd_, &temp_msghdrs_[i], MSG_DONTWAIT);
-            if (len < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    break;  // 没有更多数据
-                }
-                return {received, errno};
-            }
-            
-            Packet pkt(temp_buffers_[i].data(), len, 0);
-            if (ring.try_push(pkt)) {
-                received++;
-            } else {
-                break;
-            }
-        }
-        
-        return {received, 0};
-#endif
     }
     
     // 批量接收数据包到数组
@@ -156,20 +129,20 @@ public:
             temp_iovecs_[i].iov_base = temp_buffers_[i].data();
             temp_iovecs_[i].iov_len = temp_buffers_[i].size();
             
-            temp_msghdrs_[i].msg_iov = &temp_iovecs_[i];
-            temp_msghdrs_[i].msg_iovlen = 1;
-            temp_msghdrs_[i].msg_name = nullptr;
-            temp_msghdrs_[i].msg_namelen = 0;
-            temp_msghdrs_[i].msg_control = nullptr;
-            temp_msghdrs_[i].msg_controllen = 0;
-            temp_msghdrs_[i].msg_flags = 0;
+            temp_msghdrs_[i].msg_hdr.msg_iov = &temp_iovecs_[i];
+            temp_msghdrs_[i].msg_hdr.msg_iovlen = 1;
+            temp_msghdrs_[i].msg_hdr.msg_name = nullptr;
+            temp_msghdrs_[i].msg_hdr.msg_namelen = 0;
+            temp_msghdrs_[i].msg_hdr.msg_control = nullptr;
+            temp_msghdrs_[i].msg_hdr.msg_controllen = 0;
+            temp_msghdrs_[i].msg_hdr.msg_flags = 0;
         }
         
-#ifdef __linux__
+        const unsigned int msg_count = static_cast<unsigned int>(packets.size());
         int received = recvmmsg(
             socket_fd_,
             temp_msghdrs_.data(),
-            packets.size(),
+            msg_count,
             MSG_DONTWAIT,
             nullptr
         );
@@ -190,30 +163,13 @@ public:
         }
         
         return {static_cast<std::size_t>(received), 0};
-#else
-        std::size_t received = 0;
-        for (std::size_t i = 0; i < packets.size(); ++i) {
-            ssize_t len = recvmsg(socket_fd_, &temp_msghdrs_[i], MSG_DONTWAIT);
-            if (len < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    break;
-                }
-                return {received, errno};
-            }
-            
-            packets[i] = Packet(temp_buffers_[i].data(), len, 0);
-            received++;
-        }
-        
-        return {received, 0};
-#endif
     }
 
 private:
     int socket_fd_;
     std::vector<Packet> temp_packets_;
     std::vector<std::vector<uint8_t>> temp_buffers_;
-    std::vector<struct msghdr> temp_msghdrs_;
+    std::vector<struct mmsghdr> temp_msghdrs_;
     std::vector<struct iovec> temp_iovecs_;
 };
 
@@ -240,21 +196,21 @@ public:
             temp_iovecs_[i].iov_base = packets[i].data;
             temp_iovecs_[i].iov_len = packets[i].len;
             
-            temp_msghdrs_[i].msg_iov = &temp_iovecs_[i];
-            temp_msghdrs_[i].msg_iovlen = 1;
-            temp_msghdrs_[i].msg_name = nullptr;
-            temp_msghdrs_[i].msg_namelen = 0;
-            temp_msghdrs_[i].msg_control = nullptr;
-            temp_msghdrs_[i].msg_controllen = 0;
-            temp_msghdrs_[i].msg_flags = 0;
+            temp_msghdrs_[i].msg_hdr.msg_iov = &temp_iovecs_[i];
+            temp_msghdrs_[i].msg_hdr.msg_iovlen = 1;
+            temp_msghdrs_[i].msg_hdr.msg_name = nullptr;
+            temp_msghdrs_[i].msg_hdr.msg_namelen = 0;
+            temp_msghdrs_[i].msg_hdr.msg_control = nullptr;
+            temp_msghdrs_[i].msg_hdr.msg_controllen = 0;
+            temp_msghdrs_[i].msg_hdr.msg_flags = 0;
         }
         
-#ifdef __linux__
-        // 使用 sendmmsg（Linux 特有）
+        // 使用 sendmmsg（Linux）
+        const unsigned int msg_count = static_cast<unsigned int>(packets.size());
         int sent = sendmmsg(
             socket_fd_,
             temp_msghdrs_.data(),
-            packets.size(),
+            msg_count,
             MSG_DONTWAIT
         );
         
@@ -266,27 +222,11 @@ public:
         }
         
         return {static_cast<std::size_t>(sent), 0};
-#else
-        // 非 Linux 系统：fallback 到单个 sendmsg
-        std::size_t sent = 0;
-        for (std::size_t i = 0; i < packets.size(); ++i) {
-            ssize_t len = sendmsg(socket_fd_, &temp_msghdrs_[i], MSG_DONTWAIT);
-            if (len < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    break;
-                }
-                return {sent, errno};
-            }
-            sent++;
-        }
-        
-        return {sent, 0};
-#endif
     }
 
 private:
     int socket_fd_;
-    std::vector<struct msghdr> temp_msghdrs_;
+    std::vector<struct mmsghdr> temp_msghdrs_;
     std::vector<struct iovec> temp_iovecs_;
 };
 

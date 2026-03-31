@@ -47,108 +47,16 @@ target_include_directories(usn_core
 # 测试
 if(USN_BUILD_TESTS)
     enable_testing()
-    
-    # Core 模块测试
-    add_executable(usn_mpsc_queue_tests
-        tests/core/mpsc_queue_basic.cpp
-    )
-    target_link_libraries(usn_mpsc_queue_tests PRIVATE usn_core pthread)
-    add_test(NAME mpsc_queue_basic COMMAND usn_mpsc_queue_tests)
-    
-    add_executable(usn_packet_ring_tests
-        tests/core/packet_ring_basic.cpp
-    )
-    target_link_libraries(usn_packet_ring_tests PRIVATE usn_core pthread)
-    add_test(NAME packet_ring_basic COMMAND usn_packet_ring_tests)
-    
-    # I/O 模块测试
-    add_executable(usn_batch_io_tests
-        tests/io/batch_io_basic.cpp
-    )
-    target_link_libraries(usn_batch_io_tests PRIVATE usn_core pthread)
-    add_test(NAME batch_io_basic COMMAND usn_batch_io_tests)
-    
-    add_executable(usn_epoll_tests
-        tests/io/epoll_basic.cpp
-    )
-    target_link_libraries(usn_epoll_tests PRIVATE usn_core pthread)
-    add_test(NAME epoll_basic COMMAND usn_epoll_tests)
-    
-    # Optimization 模块测试
-    add_executable(usn_zero_copy_tests
-        tests/optimization/zero_copy_basic.cpp
-    )
-    target_link_libraries(usn_zero_copy_tests PRIVATE usn_core pthread)
-    add_test(NAME zero_copy_basic COMMAND usn_zero_copy_tests)
-    
-    add_executable(usn_numa_utils_tests
-        tests/optimization/numa_utils_basic.cpp
-    )
-    target_link_libraries(usn_numa_utils_tests PRIVATE usn_core pthread)
-    if(USN_HAVE_NUMA)
-        target_link_libraries(usn_numa_utils_tests PRIVATE ${NUMA_LIBRARY})
-    endif()
-    add_test(NAME numa_utils_basic COMMAND usn_numa_utils_tests)
-    
-    # Protocol 模块测试
-    add_executable(usn_udp_protocol_tests
-        tests/protocol/udp_protocol_basic.cpp
-    )
-    target_link_libraries(usn_udp_protocol_tests PRIVATE usn_core pthread)
-    add_test(NAME udp_protocol_basic COMMAND usn_udp_protocol_tests)
-    
-    add_executable(usn_tcp_protocol_tests
-        tests/protocol/tcp_protocol_basic.cpp
-    )
-    target_link_libraries(usn_tcp_protocol_tests PRIVATE usn_core pthread)
-    add_test(NAME tcp_protocol_basic COMMAND usn_tcp_protocol_tests)
+    add_subdirectory(tests)
 endif()
 
 # 基准测试
 if(USN_BUILD_BENCHMARKS)
-    add_executable(usn_mpsc_queue_bench
-        benchmarks/core/mpsc_queue_bench.cpp
-    )
-    target_link_libraries(usn_mpsc_queue_bench PRIVATE usn_core pthread)
+    add_subdirectory(benchmarks)
 endif()
 
 # 示例程序
-add_executable(usn_mpsc_queue_example
-    examples/core/mpsc_queue_example.cpp
-)
-target_link_libraries(usn_mpsc_queue_example PRIVATE usn_core pthread)
+add_subdirectory(examples)
 
-add_executable(usn_packet_ring_example
-    examples/core/packet_ring_example.cpp
-)
-target_link_libraries(usn_packet_ring_example PRIVATE usn_core pthread)
-
-add_executable(usn_zero_copy_example
-    examples/optimization/zero_copy_example.cpp
-)
-target_link_libraries(usn_zero_copy_example PRIVATE usn_core pthread)
-if(USN_HAVE_NUMA)
-    target_link_libraries(usn_zero_copy_example PRIVATE ${NUMA_LIBRARY})
-endif()
-
-# 应用：TCP 订单系统（单线程）
-add_executable(order_gateway
-    apps/order_tcp/order_gateway.cpp
-)
-target_link_libraries(order_gateway PRIVATE usn_core pthread)
-
-add_executable(order_client
-    apps/order_tcp/order_client.cpp
-)
-target_link_libraries(order_client PRIVATE usn_core pthread)
-
-# 应用：UDP 行情组播
-add_executable(feed_publisher
-    apps/market_udp/feed_publisher.cpp
-)
-target_link_libraries(feed_publisher PRIVATE usn_core pthread)
-
-add_executable(feed_subscriber
-    apps/market_udp/feed_subscriber.cpp
-)
-target_link_libraries(feed_subscriber PRIVATE usn_core pthread)
+# 应用程序
+add_subdirectory(apps)
