@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <string>
+#include <vector>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <thread>
@@ -16,14 +18,29 @@
 
 namespace {
 
-pid_t spawn_process(const char* bin_path) {
+void print_usage(const char* prog) {
+    std::cout
+        << "Usage: " << prog << " [--duration SEC] [--qps REQ_PER_SEC] [--burst N]\n"
+        << "               [--disconnect-interval-s SEC] [--server-drop-at-s SEC]\n"
+        << "               [--timeout-ms MS] [--cancel-ratio 0-100] [--replace-ratio 0-100]\n"
+        << "               [--gateway-backpressure-threshold N]\n";
+}
+
+pid_t spawn_process(const char* bin_path, const std::vector<std::string>& args) {
     pid_t pid = ::fork();
     if (pid < 0) {
         std::perror("fork");
         return -1;
     }
     if (pid == 0) {
-        ::execl(bin_path, bin_path, static_cast<char*>(nullptr));
+        std::vector<char*> argv;
+        argv.reserve(args.size() + 2);
+        argv.push_back(const_cast<char*>(bin_path));
+        for (const auto& arg : args) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        argv.push_back(nullptr);
+        ::execv(bin_path, argv.data());
         std::perror("execl");
         _exit(127);
     }
@@ -45,12 +62,57 @@ int main(int argc, char** argv) {
     constexpr const char* kClientPath = "./build/apps/order_client";
 
     int run_seconds = 10;
-    if (argc >= 2) {
-        run_seconds = std::max(1, std::atoi(argv[1]));
+    int qps = 2;
+    int burst = 1;
+    int disconnect_interval_s = 0;
+    int server_drop_at_s = 0;
+    int timeout_ms = 1000;
+    int cancel_ratio = 0;
+    int replace_ratio = 0;
+    int gateway_backpressure_threshold = 0;
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--help") {
+            print_usage(argv[0]);
+            return 0;
+        }
+    }
+
+    for (int i = 1; i + 1 < argc; i += 2) {
+        const std::string key = argv[i];
+        const int val = std::atoi(argv[i + 1]);
+        if (key == "--duration") {
+            run_seconds = std::max(1, val);
+        } else if (key == "--qps") {
+            qps = std::max(1, val);
+        } else if (key == "--burst") {
+            burst = std::max(1, val);
+        } else if (key == "--disconnect-interval-s") {
+            disconnect_interval_s = std::max(0, val);
+        } else if (key == "--server-drop-at-s") {
+            server_drop_at_s = std::max(0, val);
+        } else if (key == "--timeout-ms") {
+            timeout_ms = std::max(1, val);
+        } else if (key == "--cancel-ratio") {
+            cancel_ratio = std::clamp(val, 0, 100);
+        } else if (key == "--replace-ratio") {
+            replace_ratio = std::clamp(val, 0, 100);
+        } else if (key == "--gateway-backpressure-threshold") {
+            gateway_backpressure_threshold = std::max(0, val);
+        } else {
+            std::cerr << "[run_order_sim] unknown arg: " << key << "\n";
+            return 1;
+        }
     }
 
     std::cout << "[run_order_sim] starting gateway...\n";
-    pid_t gateway = spawn_process(kGatewayPath);
+    pid_t gateway = spawn_process(
+        kGatewayPath,
+        {
+            "--server-drop-at-s", std::to_string(server_drop_at_s),
+            "--backpressure-threshold", std::to_string(gateway_backpressure_threshold),
+        }
+    );
     if (gateway <= 0) {
         return 1;
     }
@@ -58,7 +120,17 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
     std::cout << "[run_order_sim] starting client...\n";
-    pid_t client = spawn_process(kClientPath);
+    pid_t client = spawn_process(
+        kClientPath,
+        {
+            "--qps", std::to_string(qps),
+            "--burst", std::to_string(burst),
+            "--disconnect-interval-s", std::to_string(disconnect_interval_s),
+            "--timeout-ms", std::to_string(timeout_ms),
+            "--cancel-ratio", std::to_string(cancel_ratio),
+            "--replace-ratio", std::to_string(replace_ratio),
+        }
+    );
     if (client <= 0) {
         stop_process(gateway);
         return 1;

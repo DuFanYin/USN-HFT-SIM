@@ -21,12 +21,35 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
 constexpr const char* kMulticastGroup = "239.0.0.1";
 constexpr int         kMulticastPort  = 9100;
+std::atomic<bool> g_running{true};
+
+void handle_signal(int) {
+    g_running.store(false, std::memory_order_release);
+}
+
+uint64_t percentile_us(std::vector<uint64_t> samples, double q) {
+    if (samples.empty()) {
+        return 0;
+    }
+    std::sort(samples.begin(), samples.end());
+    const std::size_t idx = static_cast<std::size_t>(q * static_cast<double>(samples.size() - 1));
+    return samples[idx];
+}
 
 int create_and_join_multicast() {
     int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -68,8 +91,26 @@ int create_and_join_multicast() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     usn::CpuAffinity::bind_to_cpu(1);
+    int subscriber_id = 0;
+    int artificial_delay_ms = 0;
+    std::string summary_file;
+    for (int i = 1; i + 1 < argc; i += 2) {
+        const std::string key = argv[i];
+        if (key == "--subscriber-id") {
+            const int val = std::atoi(argv[i + 1]);
+            subscriber_id = std::max(0, val);
+        } else if (key == "--artificial-delay-ms") {
+            const int val = std::atoi(argv[i + 1]);
+            artificial_delay_ms = std::max(0, val);
+        } else if (key == "--summary-file") {
+            summary_file = argv[i + 1];
+        }
+    }
+
+    ::signal(SIGINT, handle_signal);
+    ::signal(SIGTERM, handle_signal);
 
     int fd = create_and_join_multicast();
     if (fd < 0) {
@@ -85,6 +126,11 @@ int main() {
     uint64_t expected_seq = 1;
     uint64_t total        = 0;
     uint64_t gaps         = 0;
+    uint64_t reorder_events = 0;
+    uint64_t max_reorder_depth = 0;
+    std::vector<uint64_t> latency_us_samples;
+    latency_us_samples.reserve(1 << 14);
+    auto last_report = std::chrono::steady_clock::now();
 
     // 处理单个数据包的逻辑
     auto process_packet = [&](usn::Packet& pkt) {
@@ -95,7 +141,7 @@ int main() {
             std::cerr << "[feed_subscriber] invalid udp packet\n";
             return;
         }
-        if (payload_len != sizeof(usn::apps::MarketDataIncrement)) {
+        if (payload_len < sizeof(usn::apps::MarketDataIncrement)) {
             std::cerr << "[feed_subscriber] unexpected payload size=" << payload_len << "\n";
             return;
         }
@@ -105,17 +151,42 @@ int main() {
 
         ++total;
         if (m.seq != expected_seq) {
-            std::cout << "[feed_subscriber] GAP: expected=" << expected_seq << " got=" << m.seq << "\n";
             if (m.seq > expected_seq) {
                 gaps += (m.seq - expected_seq);
+                expected_seq = m.seq + 1;
+            } else {
+                ++reorder_events;
+                max_reorder_depth = std::max(max_reorder_depth, expected_seq - m.seq);
             }
-            expected_seq = m.seq + 1;
         } else {
             ++expected_seq;
         }
 
-        if (total % 10 == 0) {
-            std::cout << "[feed_subscriber] stats: total=" << total << " gaps=" << gaps << "\n";
+        if (artificial_delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(artificial_delay_ms));
+        }
+
+        const uint64_t now_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()
+            ).count()
+        );
+        if (now_ns >= m.send_ts_ns) {
+            latency_us_samples.push_back((now_ns - m.send_ts_ns) / 1000u);
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_report >= std::chrono::seconds(1)) {
+            std::cout << "[feed_subscriber][metrics] id=" << subscriber_id
+                      << " recv_total=" << total
+                      << " gaps=" << gaps
+                      << " reorder_events=" << reorder_events
+                      << " max_reorder_depth=" << max_reorder_depth
+                      << " latency_p50_us=" << percentile_us(latency_us_samples, 0.50)
+                      << " latency_p99_us=" << percentile_us(latency_us_samples, 0.99)
+                      << " latency_p999_us=" << percentile_us(latency_us_samples, 0.999)
+                      << " latency_max_us=" << percentile_us(latency_us_samples, 1.00) << "\n";
+            last_report = now;
         }
     };
 
@@ -129,6 +200,10 @@ int main() {
 
     poller.start(
         [&]() -> bool {
+            if (!g_running.load(std::memory_order_acquire)) {
+                poller.stop();
+                return false;
+            }
             // 批量接收到 ring
             auto result = batch_recv.recv_batch(ring, 16);
 
@@ -146,6 +221,30 @@ int main() {
             poller.adaptive_adjust();
         }
     );
+
+    std::cout << "[feed_subscriber][final] id=" << subscriber_id
+              << " recv_total=" << total
+              << " gaps=" << gaps
+              << " reorder_events=" << reorder_events
+              << " max_reorder_depth=" << max_reorder_depth
+              << " latency_p50_us=" << percentile_us(latency_us_samples, 0.50)
+              << " latency_p99_us=" << percentile_us(latency_us_samples, 0.99)
+              << " latency_p999_us=" << percentile_us(latency_us_samples, 0.999)
+              << " latency_max_us=" << percentile_us(latency_us_samples, 1.00) << "\n";
+    if (!summary_file.empty()) {
+        std::ofstream out(summary_file, std::ios::trunc);
+        if (out.good()) {
+            out << "id=" << subscriber_id
+                << " recv_total=" << total
+                << " gaps=" << gaps
+                << " reorder_events=" << reorder_events
+                << " max_reorder_depth=" << max_reorder_depth
+                << " latency_p50_us=" << percentile_us(latency_us_samples, 0.50)
+                << " latency_p99_us=" << percentile_us(latency_us_samples, 0.99)
+                << " latency_p999_us=" << percentile_us(latency_us_samples, 0.999)
+                << " latency_max_us=" << percentile_us(latency_us_samples, 1.00) << "\n";
+        }
+    }
 
     ::close(fd);
     return 0;

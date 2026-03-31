@@ -20,8 +20,13 @@
 #include <unistd.h>
 
 #include <array>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
+#include <thread>
+#include <unordered_set>
 #include <unordered_map>
 
 namespace {
@@ -67,8 +72,19 @@ int create_listen_socket() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     usn::CpuAffinity::bind_to_cpu(0);
+    int server_drop_at_s = 0;
+    int backpressure_threshold = 0;
+    for (int i = 1; i + 1 < argc; i += 2) {
+        const std::string key = argv[i];
+        const int val = std::atoi(argv[i + 1]);
+        if (key == "--server-drop-at-s") {
+            server_drop_at_s = std::max(0, val);
+        } else if (key == "--backpressure-threshold") {
+            backpressure_threshold = std::max(0, val);
+        }
+    }
 
     int listen_fd = create_listen_socket();
     if (listen_fd < 0) {
@@ -101,6 +117,16 @@ int main() {
 
     std::unordered_map<int, ConnectionContext> conn_ctx;
     std::vector<epoll_event> events;
+    uint64_t req_recv_total = 0;
+    uint64_t ack_sent_total = 0;
+    uint64_t reject_total = 0;
+    uint64_t backpressure_hits = 0;
+    uint64_t accept_failures = 0;
+    uint64_t unexpected_disconnects = 0;
+    std::size_t active_conn_peak = 0;
+    std::unordered_set<uint64_t> live_orders;
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_report = std::chrono::steady_clock::now();
 
     while (true) {
         int n = epoll.wait(events, -1);
@@ -123,6 +149,7 @@ int main() {
                                                 &cli_len, SOCK_NONBLOCK);
                 if (conn_fd < 0) {
                     std::perror("accept4");
+                    ++accept_failures;
                     continue;
                 }
 
@@ -140,6 +167,7 @@ int main() {
                 ctx.tcp.recv_seq = 1;
                 ctx.tcp.send_seq = 1;
                 conn_ctx.emplace(conn_fd, ctx);
+                active_conn_peak = std::max(active_conn_peak, conn_ctx.size());
 
                 char ip[64]{};
                 ::inet_ntop(AF_INET, &cli_addr.sin_addr, ip, sizeof(ip));
@@ -156,6 +184,7 @@ int main() {
                     }
                     if (nread == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
                         std::cout << "[order_gateway] connection closed, fd=" << fd << "\n";
+                        ++unexpected_disconnects;
                         epoll.remove(fd);
                         ::close(fd);
                         conn_ctx.erase(fd);
@@ -173,6 +202,13 @@ int main() {
         usn::Packet pkt;
         while (req_ring.try_pop(pkt)) {
             int fd = static_cast<int>(pkt.port);
+            if (server_drop_at_s > 0 &&
+                std::chrono::steady_clock::now() - start_time >= std::chrono::seconds(server_drop_at_s)) {
+                epoll.remove(fd);
+                ::close(fd);
+                conn_ctx.erase(fd);
+                continue;
+            }
 
             usn::TcpHeader tcp_header{};
             const uint8_t* payload = nullptr;
@@ -192,26 +228,60 @@ int main() {
 
             usn::apps::OrderRequest req{};
             std::memcpy(&req, payload, sizeof(req));
-            std::cout << "[order_gateway] received order: client_order_id=" << req.client_order_id
-                      << " instr=" << req.instrument_id << " side=" << static_cast<int>(req.side)
-                      << " px=" << req.price << " qty=" << req.quantity << "\n";
+            ++req_recv_total;
+            bool accepted = true;
+            if (req.action == usn::apps::OrderAction::New) {
+                live_orders.insert(req.client_order_id);
+            } else if (req.action == usn::apps::OrderAction::Cancel) {
+                accepted = live_orders.erase(req.target_order_id) > 0;
+            } else if (req.action == usn::apps::OrderAction::Replace) {
+                accepted = live_orders.find(req.target_order_id) != live_orders.end();
+            }
+            if (!accepted) {
+                ++reject_total;
+            }
+            if (backpressure_threshold > 0 &&
+                static_cast<int>(req_ring.size()) >= backpressure_threshold) {
+                ++backpressure_hits;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
 
             auto it = conn_ctx.find(fd);
             if (it != conn_ctx.end()) {
                 it->second.tcp.recv_seq += static_cast<uint32_t>(payload_len);
-                uint8_t dummy = 0;
                 uint8_t* ack_buf = ack_pool.allocate();
+                usn::apps::OrderAck ack{};
+                ack.client_order_id = req.client_order_id;
+                ack.server_order_id = req.client_order_id + 1000000;
+                ack.accepted = accepted;
                 usn::Packet ack_packet = usn::TcpProtocol::create_data(
                     it->second.tcp,
-                    &dummy,
-                    0,
+                    reinterpret_cast<const uint8_t*>(&ack),
+                    sizeof(ack),
                     ack_buf
                 );
                 ssize_t nw = ::write(fd, ack_packet.data, ack_packet.len);
                 ack_pool.deallocate(ack_packet.data);
                 if (nw != static_cast<ssize_t>(ack_packet.len)) {
                     std::cerr << "[order_gateway] failed to send tcp ack, fd=" << fd << "\n";
+                    ++unexpected_disconnects;
+                } else {
+                    ++ack_sent_total;
                 }
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_report >= std::chrono::seconds(1)) {
+                std::cout << "[order_gateway][metrics] req_recv_total=" << req_recv_total
+                          << " ack_sent_total=" << ack_sent_total
+                          << " active_conn=" << conn_ctx.size()
+                          << " active_conn_peak=" << active_conn_peak
+                          << " accept_failures=" << accept_failures
+                          << " unexpected_disconnects=" << unexpected_disconnects
+                          << " reject_total=" << reject_total
+                          << " reject_rate=" << (req_recv_total ? (static_cast<double>(reject_total) / req_recv_total) : 0.0)
+                          << " backpressure_hits=" << backpressure_hits << "\n";
+                last_report = now;
             }
         }
     }
